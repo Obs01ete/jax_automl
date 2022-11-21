@@ -30,10 +30,10 @@ class ConvOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        # h, w = np_rng.choice(list(range(4, 256, 4)), size=(2,))
-        # k, c = np_rng.choice(list(range(4, 512, 4)), size=(2,))
-        h, w = 512, 512
-        k, c = 128, np_rng.choice(list(range(4, 512, 4)))
+        h, w = np_rng.choice(list(range(4, 256, 4)), size=(2,))
+        k, c = np_rng.choice(list(range(4, 512, 4)), size=(2,))
+        # h, w = 512, 512
+        # k, c = 128, np_rng.choice(list(range(4, 512, 4)))
         r = np_rng.choice((1, 3, 5))
         s = np_rng.choice((1, 3, 5))
         u = np_rng.choice((1, 2))
@@ -79,22 +79,21 @@ class Operator:
             return self.op.init(self.rng_key, jnp.ones(tensor_shape))
         variables = _init()
         # model = self.op.bind(variables, mutable=False)
-        # def _apply():
-        #     # return model(inp_tensor).block_until_ready()
-        #     return self.op.apply(variables, inp_tensor)
-        # _apply = jax.jit(_apply)
-        # forward = jax.jit(self.op.__call__)
-        forward = jax.jit(self.op.apply)
-        durations_s = []
-        for i in range(5):
+        def _create():
             inp_cpu = jax.random.uniform(self.rng_key, shape=tensor_shape)
             inp_tensor = jax.device_put(inp_cpu, self.device)
-            # print(inp_tensor[0, 0, :])
+            return inp_tensor
+        forward = jax.jit(self.op.apply)
+        def _forward(*args):
+            return forward(*args).block_until_ready()
+        durations_s = []
+        for i in range(5):
+            inp_tensor = _create()
             start_time = time.time()
-            result = forward(variables, inp_tensor).block_until_ready()
+            result = _forward(variables, inp_tensor)
             duration_s = time.time() - start_time
             durations_s.append(duration_s)
-            print(result[0, 0, 0, :])
+            # print(result[0, 0, 0, :])
             self.rng_key, _ = jax.random.split(self.rng_key)
         print("durations_s", durations_s)
         median_s = np.median(durations_s)
