@@ -30,9 +30,10 @@ class ConvOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        h, w = np_rng.choice(list(range(4, 256, 4)), size=(2,))
-        k = np_rng.integers(16, 32)
-        c = np_rng.integers(16, 32)
+        # h, w = np_rng.choice(list(range(4, 256, 4)), size=(2,))
+        # k, c = np_rng.choice(list(range(4, 512, 4)), size=(2,))
+        h, w = 512, 512
+        k, c = 128, np_rng.choice(list(range(4, 512, 4)))
         r = np_rng.choice((1, 3, 5))
         s = np_rng.choice((1, 3, 5))
         u = np_rng.choice((1, 2))
@@ -47,54 +48,71 @@ class ConvOpSpecs:
 class OneConvLayer(nn.Module):
     specs: ConvSpecs
 
-    # def __init__(self, specs: ConvSpecs):
-    #     super().__init__()
-    #     self.specs = specs
+    def setup(self):
+        self.linear = nn.Dense(features=self.specs.r)
 
-    @nn.compact
+    # @nn.compact
     def __call__(self, x):
-        print(self.specs)
-        print(x.shape)
-        conv = nn.Conv(features=self.specs.r,
-            kernel_size=(self.specs.r, self.specs.s),
-            strides=(self.specs.u, self.specs.v))
-        x = conv(x)
+        # print(self.specs)
+        # print(x.shape)
+        # conv = nn.Conv(features=self.specs.r,
+        #     kernel_size=(self.specs.r, self.specs.s),
+        #     strides=(self.specs.u, self.specs.v))
+        # x = conv(x)
+        x = self.linear(x)
         x = nn.relu(x)
         return x
 
 
 class Operator:
-    def __init__(self, inp_tensor: jnp.DeviceArray, op: nn.Module, rng_key):
-        self.inp_tensor = inp_tensor
+    def __init__(self, tensor_shape: TensorSpecs, op: OneConvLayer, rng_key, device: str):
+        self.tensor_shape = tensor_shape
         self.op = op
         self.rng_key = rng_key
+        self.device = device
 
     def benchmark(self):
-        # cnn = self.op()
-        shape = self.inp_tensor.shape
-        variables = self.op.init(self.rng_key, jnp.ones(shape))
-        start_time = time.time()
-        pred = self.op.apply(variables, self.inp_tensor)
-        pred.wait_until_done()
-        duration_s = time.time() - start_time
-        return duration_s
+        print(self.tensor_shape, self.op.specs)
+        shape = self.tensor_shape
+        tensor_shape = (1, shape.h, shape.w, shape.c)
+        def _init():
+            return self.op.init(self.rng_key, jnp.ones(tensor_shape))
+        variables = _init()
+        # model = self.op.bind(variables, mutable=False)
+        # def _apply():
+        #     # return model(inp_tensor).block_until_ready()
+        #     return self.op.apply(variables, inp_tensor)
+        # _apply = jax.jit(_apply)
+        # forward = jax.jit(self.op.__call__)
+        forward = jax.jit(self.op.apply)
+        durations_s = []
+        for i in range(5):
+            inp_cpu = jax.random.uniform(self.rng_key, shape=tensor_shape)
+            inp_tensor = jax.device_put(inp_cpu, self.device)
+            # print(inp_tensor[0, 0, :])
+            start_time = time.time()
+            result = forward(variables, inp_tensor).block_until_ready()
+            duration_s = time.time() - start_time
+            durations_s.append(duration_s)
+            print(result[0, 0, 0, :])
+            self.rng_key, _ = jax.random.split(self.rng_key)
+        print("durations_s", durations_s)
+        median_s = np.median(durations_s)
+        print("median_s", median_s)
+        compile_time_s = durations_s[0] - median_s
+        print("compile_time_s", compile_time_s)
+        return median_s
 
 
 def OperatorFactory(device, seed=42) -> Iterable[Operator]:
     rng_key = jax.random.PRNGKey(seed=seed)
     np_rng = np.random.default_rng(np.asarray(rng_key))
     while True:
-        # conv_op_specs = ConvOpSpecs.get_random(np_rng)
-        conv_op_specs = ConvOpSpecs(TensorSpecs(28, 28, 3), ConvSpecs(16, 3, 3, 1, 1))
-        shape = conv_op_specs.tensor_specs
-        inp_cpu = jax.random.uniform(rng_key, shape=(1, shape.h, shape.w, shape.c))
-        print(type(inp_cpu))
-        print(inp_cpu.device_buffer.device())
-        inp = jax.device_put(inp_cpu, device)
-        print(type(inp))
-        print(inp.device_buffer.device())
+        conv_op_specs = ConvOpSpecs.get_random(np_rng)
+        # conv_op_specs = ConvOpSpecs(TensorSpecs(28, 28, 3), ConvSpecs(16, 3, 3, 1, 1))
         layer = OneConvLayer(conv_op_specs.conv_specs)
-        op = Operator(inp, layer, rng_key)
+        op = Operator(conv_op_specs.tensor_specs, layer, rng_key, device)
+        rng_key, _ = jax.random.split(rng_key)
         yield op
 
 
@@ -104,9 +122,10 @@ def main():
     gpu = gpus[0]
 
     factory = OperatorFactory(gpu)
-    op = next(factory)
-    print(op)
-    print(op.benchmark())
+    for _ in range(10):
+        op = next(factory)
+        # print(op)
+        op.benchmark()
 
     print("Done")
 
