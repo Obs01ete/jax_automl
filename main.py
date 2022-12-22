@@ -1,11 +1,15 @@
+import os
 import time
+import json
 from typing import Iterable, Union, Callable, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+import dataclasses
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from tqdm import tqdm
 
 
 class Linearizable(ABC):
@@ -74,7 +78,13 @@ class LinearOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        fi, fo = np_rng.choice(list(range(16, 4096, 16)), size=(2,))
+        # fi, fo = np_rng.choice(list(range(16, 4096, 16)), size=(2,))
+        max_features = 4096
+        step = 16
+        fifo = np_rng.exponential(scale=max_features//4, size=(2,))
+        fifo = np.remainder(fifo, max_features).astype(np.int32)
+        fifo = (np.ceil(fifo / step) * step).astype(np.int32)
+        fi, fo = (int(v) for v in fifo)
         # fi, fo = 512, 1024
         ts = Tensor1DSpecs(fi)
         cs = LinearSpecs(fo)
@@ -117,6 +127,9 @@ class Operator:
         self.op = op
         self.rng_key = rng_key
         self.device = device
+    
+    def get_params(self):
+        return self.tensor_shape, self.op.specs
 
     def benchmark(self):
         print(self.tensor_shape, self.op.specs)
@@ -151,11 +164,10 @@ class Operator:
         return median_s
 
 
-def OperatorFactory(device, seed=42) -> Iterable[Operator]:
+def OperatorFactory(device, op_type, seed=42) -> Iterable[Operator]:
     rng_key = jax.random.PRNGKey(seed=seed)
     np_rng = np.random.default_rng(np.asarray(rng_key))
     while True:
-        op_type = 'linear' # 'linear' 'conv2d'
         op_specs_class = {'linear': LinearOpSpecs, 'conv2d': ConvOpSpecs}[op_type]
         random_op_specs = op_specs_class.get_random(np_rng)
         # conv_op_specs = ConvOpSpecs(TensorSpecs(28, 28, 3), ConvSpecs(16, 3, 3, 1, 1))
@@ -166,16 +178,55 @@ def OperatorFactory(device, seed=42) -> Iterable[Operator]:
         yield op
 
 
+def create_dataset(device, op_type, num_samples):
+    factory = OperatorFactory(device, op_type)
+    measurement_list = []
+    common_feature_names = None
+    for _ in tqdm(range(num_samples)):
+        op = next(factory)
+        # print(op)
+        params = op.get_params()
+        feature_names = []
+        features = []
+        for group in params:
+            group_name = group.__class__.__name__
+            group_dict = dataclasses.asdict(group)
+            keys = sorted(list(group_dict.keys()))
+            for key in keys:
+                feature_name = f"{group_name}_{key}"
+                value = group_dict[key]
+                feature_names.append(feature_name)
+                features.append(value)
+        if common_feature_names is None:
+            common_feature_names = feature_names
+        if feature_names != common_feature_names:
+            print("Error: different features")
+        latency = op.benchmark()
+        measurement_list.append(dict(features=features, target=latency))
+    return dict(dataset=measurement_list, feature_names=common_feature_names)
+
+
 def main():
     cpus = jax.devices("cpu")
     gpus = jax.devices("gpu")
     gpu = gpus[0]
 
-    factory = OperatorFactory(gpu)
-    for _ in range(10):
-        op = next(factory)
-        # print(op)
-        op.benchmark()
+    op_type = 'linear' # 'linear' 'conv2d'
+    dataset_name = f"{op_type}_data.json"
+    if os.path.exists(dataset_name):
+        with open(dataset_name, "r") as f:
+            dataset = json.load(f)
+    else:
+        num_samples = 1000
+        print(f"Measuring {num_samples} samples")
+        time_start = time.time()
+        dataset = create_dataset(gpu, op_type, num_samples)
+        gen_wall_time = time.time() - time_start
+        print(f"Generated in {int(gen_wall_time)} seconds")
+        with open(dataset_name, "w") as f:
+            json.dump(dataset, f, indent=4)
+
+    # print(dataset)
 
     print("Done")
 
