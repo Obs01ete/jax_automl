@@ -1,10 +1,17 @@
 import time
-from typing import Iterable
+from typing import Iterable, Union, Callable, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
+
+
+class Linearizable(ABC):
+    @abstractmethod
+    def linearize(self) -> Tuple[int]:
+        pass
 
 
 @dataclass(frozen=True)
@@ -17,16 +24,32 @@ class ConvSpecs:
 
 
 @dataclass(frozen=True)
-class TensorSpecs:
+class LinearSpecs:
+    k: int # ch_out
+
+
+@dataclass(frozen=True)
+class Tensor3DSpecs(Linearizable):
     h: int # tensor height
     w: int # tensor width
     c: int # ch_in
 
+    def linearize(self):
+        return (self.h, self.w, self.c)
+
+
+@dataclass(frozen=True)
+class Tensor1DSpecs(Linearizable):
+    f: int # features (neurons)
+
+    def linearize(self):
+        return (self.f,)
+
 
 class ConvOpSpecs:
-    def __init__(self, tensor_specs: TensorSpecs, conv_specs: ConvSpecs):
+    def __init__(self, tensor_specs: Tensor3DSpecs, op_specs: ConvSpecs):
         self.tensor_specs = tensor_specs
-        self.conv_specs = conv_specs
+        self.op_specs = op_specs
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
@@ -38,34 +61,58 @@ class ConvOpSpecs:
         s = np_rng.choice((1, 3, 5))
         u = np_rng.choice((1, 2))
         v = np_rng.choice((1, 2))
-        ts = TensorSpecs(h, w, c)
+        ts = Tensor3DSpecs(h, w, c)
         cs =  ConvSpecs(k, r, s, u, v)
         os = cls(ts, cs)
         return os
 
+
+class LinearOpSpecs:
+    def __init__(self, tensor_specs: Tensor1DSpecs, op_specs: LinearSpecs):
+        self.tensor_specs = tensor_specs
+        self.op_specs = op_specs
+
+    @classmethod
+    def get_random(cls, np_rng: np.random._generator.Generator):
+        fi, fo = np_rng.choice(list(range(16, 4096, 16)), size=(2,))
+        # fi, fo = 512, 1024
+        ts = Tensor1DSpecs(fi)
+        cs = LinearSpecs(fo)
+        os = cls(ts, cs)
+        return os
 
 
 class OneConvLayer(nn.Module):
     specs: ConvSpecs
 
     def setup(self):
-        self.linear = nn.Dense(features=self.specs.r)
+        self.conv = nn.Conv(features=self.specs.r,
+            kernel_size=(self.specs.r, self.specs.s),
+            strides=(self.specs.u, self.specs.v))
 
     # @nn.compact
     def __call__(self, x):
-        # print(self.specs)
-        # print(x.shape)
-        # conv = nn.Conv(features=self.specs.r,
-        #     kernel_size=(self.specs.r, self.specs.s),
-        #     strides=(self.specs.u, self.specs.v))
-        # x = conv(x)
+        x = self.conv(x)
+        x = nn.relu(x)
+        return x
+
+
+class OneLinearLayer(nn.Module):
+    specs: LinearSpecs
+
+    def setup(self):
+        self.linear = nn.Dense(features=self.specs.k)
+
+    # @nn.compact
+    def __call__(self, x):
         x = self.linear(x)
         x = nn.relu(x)
         return x
 
 
 class Operator:
-    def __init__(self, tensor_shape: TensorSpecs, op: OneConvLayer, rng_key, device: str):
+    def __init__(self, tensor_shape: Linearizable,
+                 op: Callable, rng_key, device: str):
         self.tensor_shape = tensor_shape
         self.op = op
         self.rng_key = rng_key
@@ -74,7 +121,8 @@ class Operator:
     def benchmark(self):
         print(self.tensor_shape, self.op.specs)
         shape = self.tensor_shape
-        tensor_shape = (1, shape.h, shape.w, shape.c)
+        batch = 1000
+        tensor_shape = (batch, *shape.linearize())
         def _init():
             return self.op.init(self.rng_key, jnp.ones(tensor_shape))
         variables = _init()
@@ -97,7 +145,7 @@ class Operator:
             self.rng_key, _ = jax.random.split(self.rng_key)
         print("durations_s", durations_s)
         median_s = np.median(durations_s)
-        print("median_s", median_s)
+        print(f"--- median_s={median_s:.6f}")
         compile_time_s = durations_s[0] - median_s
         print("compile_time_s", compile_time_s)
         return median_s
@@ -107,10 +155,13 @@ def OperatorFactory(device, seed=42) -> Iterable[Operator]:
     rng_key = jax.random.PRNGKey(seed=seed)
     np_rng = np.random.default_rng(np.asarray(rng_key))
     while True:
-        conv_op_specs = ConvOpSpecs.get_random(np_rng)
+        op_type = 'linear' # 'linear' 'conv2d'
+        op_specs_class = {'linear': LinearOpSpecs, 'conv2d': ConvOpSpecs}[op_type]
+        random_op_specs = op_specs_class.get_random(np_rng)
         # conv_op_specs = ConvOpSpecs(TensorSpecs(28, 28, 3), ConvSpecs(16, 3, 3, 1, 1))
-        layer = OneConvLayer(conv_op_specs.conv_specs)
-        op = Operator(conv_op_specs.tensor_specs, layer, rng_key, device)
+        one_layer_class = {'linear': OneLinearLayer, 'conv2d': OneConvLayer}[op_type]
+        layer = one_layer_class(random_op_specs.op_specs)
+        op = Operator(random_op_specs.tensor_specs, layer, rng_key, device)
         rng_key, _ = jax.random.split(rng_key)
         yield op
 
