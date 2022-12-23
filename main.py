@@ -256,6 +256,7 @@ class LatencyNet(nn.Module):
 
     @nn.compact
     def __call__(self, x):
+        x = 1e-3 * x
         x = nn.relu(self.linear1(x))
         x = nn.relu(self.linear2(x))
         x = nn.relu(self.linear3(x))
@@ -265,7 +266,7 @@ class LatencyNet(nn.Module):
         x = nn.relu(self.linear7(x))
         x = nn.relu(self.linear8(x))
         x = self.linear9(x)
-        # x = 1e-3 * x
+        x = 1e-3 * x
         x = x.squeeze(1)
         return x
 
@@ -284,11 +285,8 @@ def load_checkpoint(ckpt_path, state):
 def init_train_state(
     model, random_key, shape, learning_rate
 ) -> train_state.TrainState:
-    # Initialize the Model
     variables = model.init(random_key, jnp.ones(shape))
-    # Create the optimizer
     optimizer = optax.adam(learning_rate)
-    # Create a State
     return train_state.TrainState.create(
         apply_fn = model.apply,
         tx=optimizer,
@@ -296,15 +294,9 @@ def init_train_state(
     )
 
 
-# def cross_entropy_loss(*, logits, labels):
-#     one_hot_encoded_labels = jax.nn.one_hot(labels, num_classes=10)
-#     return optax.softmax_cross_entropy(
-#         logits=logits, labels=one_hot_encoded_labels
-#     ).mean()
-
-
 def total_loss(*, pred, label):
-    total = mape_metric(pred=pred, label=label, smoothener=0.00) # 0.001
+    smoothener_sec = 0.001
+    total = mape_metric(pred=pred, label=label, smoothener=smoothener_sec)
     return total
 
 
@@ -364,19 +356,16 @@ class LatencyModelTrainer:
         self.targets = np.array([r['target'] for r in dataset['dataset']])
 
         self.batch_size = 128
-        learning_rate = 1e-3
+        learning_rate = 1e-5
 
-        # self.train_dataset = tf.data.Dataset.from_tensor_slices((self.features, self.targets))
-        lin_feat = np.tile(np.expand_dims(np.linspace(0.01/1000, 0.01, 1000), 1), (1, 2))
-        lin_targets = np.linspace(0.01/1000, 0.01, 1000)
-        self.train_dataset = tf.data.Dataset.from_tensor_slices((lin_feat, lin_targets))
+        self.train_dataset = tf.data.Dataset.from_tensor_slices((self.features, self.targets))
+        # lin_feat = np.tile(np.expand_dims(np.linspace(0.01/1000, 0.01, 1000), 1), (1, 2))
+        # lin_targets = np.linspace(0.01/1000, 0.01, 1000)
+        # self.train_dataset = tf.data.Dataset.from_tensor_slices((lin_feat, lin_targets))
 
         self.net = LatencyNet()
 
         self.rng = jax.random.PRNGKey(43)
-        # dummpy_input = jnp.ones(shape=(self.batch_size, self.features.shape[1]))
-        # self.params = self.net.init(self.rng, dummpy_input)
-        # jax.tree_map(lambda x: x.shape, self.params) # Check the parameters
         self.state = init_train_state(
            self.net, self.rng, (self.batch_size, self.features.shape[1]), learning_rate)
 
@@ -413,10 +402,11 @@ class LatencyModelTrainer:
                     # print("pred", pred_np)
                     # print("gt", gt_batch)
                     print("")
-                    plt.figure()
-                    plt.scatter(gt_batch, pred_np, marker='.')
-                    plt.grid()
-                    plt.show()
+                    if False:
+                        plt.figure()
+                        plt.scatter(gt_batch, pred_np, marker='.')
+                        plt.grid()
+                        plt.show()
                 train_batch_metrics.append(metrics)
             train_batch_metrics = accumulate_metrics(train_batch_metrics)
 
