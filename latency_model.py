@@ -2,6 +2,7 @@ import os
 import math
 import numpy as np
 from tqdm import tqdm
+from functools import partial
 import matplotlib.pyplot as plt
 
 import tensorflow as tf
@@ -136,6 +137,20 @@ def evaluate(
     return metrics, pred
 
 
+class LatencyEvaluator:
+    def __init__(self, apply_fn, params):
+        self._apply_fn = apply_fn
+        self._params = params
+
+    def latency_fn(self):
+        def apply_fn(params, features):
+            return self._apply_fn({'params': params}, features)
+        return apply_fn
+
+    def params(self):
+        return self._params
+
+
 class LatencyModelTrainer:
     def __init__(self, dataset, name='linear'):
         self.dataset = dataset
@@ -247,3 +262,6 @@ class LatencyModelTrainer:
             self.state = restored_state
         else:
             self.train()
+
+    def get_evaluator(self):
+        return LatencyEvaluator(self.net.apply, self.state.params)
