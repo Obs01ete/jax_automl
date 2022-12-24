@@ -94,7 +94,9 @@ class LinearOpSpecs:
         step = 16
         fifo = np_rng.exponential(scale=max_features//2, size=(2,))
         fifo = np.remainder(fifo, max_features).astype(np.int32)
-        fifo = (np.ceil(fifo / step) * step).astype(np.int32)
+        fifo = np.ceil(fifo / step).astype(np.int32)
+        fifo[fifo <= 0] = 1
+        fifo = (fifo * step).astype(np.int32)
         fi, fo = (int(v) for v in fifo)
         # fi, fo = 512, 1024
         ts = Tensor1DSpecs(fi)
@@ -228,7 +230,7 @@ def load_or_create_dataset():
         with open(dataset_name, "r") as f:
             dataset = json.load(f)
     else:
-        num_samples = 1000
+        num_samples = 20000 # 1000
         print(f"Measuring {num_samples} samples")
         time_start = time.time()
         dataset = create_dataset(gpu, op_type, num_samples)
