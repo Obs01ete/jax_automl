@@ -1,3 +1,5 @@
+import os
+import math
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -8,7 +10,7 @@ import tensorflow_datasets as tfds
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.training import train_state
+from flax.training import train_state, checkpoints
 from flax.serialization import (
     to_state_dict, msgpack_serialize, from_bytes
 )
@@ -124,11 +126,22 @@ def train_step(
     metrics = compute_metrics(pred=pred, label=label)
     return state, metrics, pred
 
+@jax.jit
+def evaluate(
+    state: train_state.TrainState, batch: jnp.ndarray
+):
+    feature, label = batch
+    pred = state.apply_fn({'params': state.params}, feature)
+    metrics = compute_metrics(pred=pred, label=label)
+    return metrics, pred
+
 
 class LatencyModelTrainer:
-    def __init__(self, dataset):
+    def __init__(self, dataset, name='linear'):
+        self.dataset = dataset
         self.features = np.array([r['features'] for r in dataset['dataset']])
         self.targets = np.array([r['target'] for r in dataset['dataset']])
+        self.name = name
 
         self.batch_size = 128
         learning_rate = 1e-5
@@ -144,13 +157,19 @@ class LatencyModelTrainer:
         self.state = init_train_state(
            self.net, self.rng, (self.batch_size, self.features.shape[1]), learning_rate)
 
+        self.checkpoint_dir = f"checkpoint_{self.name}"
         print("")
-        
+
+    @staticmethod        
+    def print_metrics(metrics):
+        metrics = {k: np.array(v).item() for k, v in metrics.items()}
+        print(metrics)
+
     def train(self):
         num_train_samples = self.train_dataset.cardinality().numpy()
         num_train_batches = num_train_samples // self.batch_size
 
-        epochs = 10000
+        epochs = math.ceil(2_000_000 / num_train_samples)
         shuffle_buffer_size = len(self.train_dataset)
 
         for epoch in tqdm(range(1, epochs + 1)):
@@ -186,8 +205,45 @@ class LatencyModelTrainer:
             train_batch_metrics = accumulate_metrics(train_batch_metrics)
 
             if epoch % 100 == 0:
-                metrics = {k: np.array(v).item() for k, v in train_batch_metrics.items()}
-                print(metrics)
+                self.print_metrics(train_batch_metrics)
+        
+        self.print_metrics(train_batch_metrics)
+
+        self.save()
 
         print("Training done")
+    
+    def evaluate(self):
+        train_batch_metrics = []
+        data_iterator = iter(tfds.as_numpy(self.train_dataset.batch(self.batch_size)))
+        preds = []
+        gts = []
+        for batch in data_iterator:
+            features, gt = batch
+            metrics, pred = evaluate(self.state, batch)
+            train_batch_metrics.append(metrics)
+            preds.extend([v.item() for v in list(pred)])
+            gts.extend([v.item() for v in list(gt)])
+        train_batch_metrics = accumulate_metrics(train_batch_metrics)
+        self.print_metrics(train_batch_metrics)
 
+        if False:
+            import matplotlib.pyplot as plt
+            plt.figure()
+            plt.scatter(gts, preds, marker='.')
+            plt.grid()
+            plt.show()
+
+    def save(self):
+        checkpoints.save_checkpoint(ckpt_dir=self.checkpoint_dir,
+            target=self.state, step=0, overwrite=True)
+        print(f"Saved to {self.checkpoint_dir}")
+
+    def load_or_train(self):
+        if os.path.exists(os.path.join(self.checkpoint_dir, "checkpoint_0")):
+            restored_state = checkpoints.restore_checkpoint(ckpt_dir=self.checkpoint_dir, target=self.state)
+            # assert jax.tree_util.tree_all(jax.tree_map(
+            #     lambda x, y: (x == y).all(), self.state.params, restored_state.params))
+            self.state = restored_state
+        else:
+            self.train()

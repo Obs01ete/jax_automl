@@ -12,7 +12,6 @@ from benchmarking import create_dataset
 from latency_model import LatencyModelTrainer
 
 
-
 def load_or_create_dataset():
     # cpus = jax.devices("cpu")
     gpus = jax.devices("gpu")
@@ -36,38 +35,44 @@ def load_or_create_dataset():
     return dataset
 
 
+def dataset_analytics(dataset):
+    latencies = [r['target'] for r in dataset['dataset']]
+    features = np.array([r['features'] for r in dataset['dataset']])
+
+    # plt.figure()
+    # plt.hist(latencies, bins=200)
+    # plt.yscale('log')
+    # plt.grid()
+    # plt.show()
+
+    # plt.figure()
+    # plt.hist(features[:, 0], bins=200)
+    # plt.yscale('log')
+    # plt.grid()
+    # plt.show()
+
+    # plt.figure()
+    # plt.hist(features[:, 1], bins=200)
+    # plt.yscale('log')
+    # plt.grid()
+    # plt.show()
+
+    plt.figure()
+    plt.scatter(features[:, 0]*features[:, 1], latencies, marker='.')
+    plt.grid()
+    plt.show()
+
+
 def main():
 
     dataset = load_or_create_dataset()
 
-    latencies = [r['target'] for r in dataset['dataset']]
-    features = np.array([r['features'] for r in dataset['dataset']])
     if False:
-        # plt.figure()
-        # plt.hist(latencies, bins=200)
-        # plt.yscale('log')
-        # plt.grid()
-        # plt.show()
-
-        # plt.figure()
-        # plt.hist(features[:, 0], bins=200)
-        # plt.yscale('log')
-        # plt.grid()
-        # plt.show()
-
-        # plt.figure()
-        # plt.hist(features[:, 1], bins=200)
-        # plt.yscale('log')
-        # plt.grid()
-        # plt.show()
-
-        plt.figure()
-        plt.scatter(features[:, 0]*features[:, 1], latencies, marker='.')
-        plt.grid()
-        plt.show()
+        dataset_analytics(dataset)
 
     trainer = LatencyModelTrainer(dataset)
-    trainer.train()
+    trainer.load_or_train()
+    trainer.evaluate()
 
     print("Done")
 
