@@ -64,34 +64,58 @@ def dataset_analytics(dataset):
     plt.show()
 
 
+def calc_weights(fin, fout):
+    return jnp.maximum(fin + 1, 0) * jnp.maximum(fout, 0)
+
+
+def double_boundary_loss(values, min_value, max_value, min_slope=1.0, max_slope=1.0):
+    return jnp.maximum(
+        max_slope * jnp.maximum(0, (values - max_value) / max_value),
+        min_slope * jnp.maximum(0, (min_value - values) / min_value),
+        )
+
+
 def gradient_automl(evaluator: LatencyEvaluator):
     min_layers = 5
     max_layers = 10
-    max_latency_sec = 0.005
-    min_latency_sec = 0.9 * max_latency_sec
-    max_parameters = 1_000_000
-    min_parameters = max_parameters // 2
+    max_latency_sec = 0.002
+    min_latency_sec = 0.75 * max_latency_sec
+    max_parameters = 4_000_000
+    min_parameters = 0.5 * max_parameters
 
     input_features_size = 10
-    features_array = np.zeros((max_layers,), dtype=np.float32) + 100
+    features_array = np.zeros((max_layers,), dtype=np.float32) + 300
 
     # @jax.jit
     def total_loss(features_arr, evaluator_latency_fn: Callable, evaluator_params):
         latencies = []
+        weight_nums = []
         for i_layer in range(max_layers):
             feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
             feat_out = features_arr[i_layer]
+
             features_jnp = jnp.expand_dims(jnp.array((feat_in, feat_out)), axis=0)
             latency = evaluator_latency_fn(evaluator_params, features_jnp)
-            latency = jnp.max(jnp.array([latency, jnp.zeros_like(latency)]), axis=0)
+            latency = jnp.maximum(latency, 0)
             latencies.append(latency)
+
+            num_weights = calc_weights(feat_in, feat_out)
+            weight_nums.append(num_weights)
+
         total_latency = jnp.sum(jnp.array(latencies))
-        latency_loss = jnp.max(jnp.array([
-            jnp.max(jnp.array([0, (total_latency - max_latency_sec) / max_latency_sec])),
-            jnp.max(jnp.array([0, (min_latency_sec - total_latency) / min_latency_sec])),
-            ]))
-        total_loss = latency_loss
-        return total_loss, total_latency
+        latency_loss = double_boundary_loss(total_latency, min_latency_sec, max_latency_sec)
+
+        total_num_weights = jnp.sum(jnp.array(weight_nums))
+        num_weights_loss = double_boundary_loss(total_num_weights, min_parameters, max_parameters)
+
+        total_loss = latency_loss + 1.0 * num_weights_loss
+
+        # print(f"latency_loss={latency_loss.item()} num_weights_loss={num_weights_loss.item()}")
+
+        aux = dict(total_latency=total_latency, latency_loss=latency_loss,
+            total_num_weights=total_num_weights, num_weights_loss=num_weights_loss)
+
+        return total_loss, aux
 
     grad_fn = jax.value_and_grad(total_loss, argnums=(0,), has_aux=True)
 
@@ -101,15 +125,17 @@ def gradient_automl(evaluator: LatencyEvaluator):
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
-        (loss, latency), (grad,) = grad_fn_partial(features_array)
+        (loss, aux_dict), (grad,) = grad_fn_partial(features_array)
         grad_scaled_mimimize = - 5e+5 * np.array(grad)
-        print(f"step={i_step} loss={loss.item():.6f}, latency={latency.item():.6f}")
+        print(f"step={i_step} loss={loss.item():.6f}")
+        aux_dict = {k: v.item() for k, v in aux_dict.items()}
+        print(f"aux_dict={aux_dict}")
         print(f"grad={grad_scaled_mimimize}")
         if jnp.mean(jnp.abs(grad_scaled_mimimize)).item() < 1e-6:
             print("Grads are zero. Early stopping.")
             break
         features_array += grad_scaled_mimimize
-        print(f"features_array={features_array}")
+        print(f"features_array={features_array.astype(np.int32)}")
 
     print(features_array)
 
