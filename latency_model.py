@@ -47,6 +47,10 @@ class LatencyNet(nn.Module):
         x = 1e-3 * x
         x = x.squeeze(1)
         return x
+    
+    # @partial(jax.jit, static_argnums=0)
+    # def apply_dk(self, *args, **kwargs):
+    #     return self.apply(*args, **kwargs)
 
 
 def save_checkpoint(ckpt_path, state, epoch):
@@ -137,18 +141,18 @@ def evaluate(
     return metrics, pred
 
 
-class LatencyEvaluator:
-    def __init__(self, apply_fn, params):
-        self._apply_fn = apply_fn
-        self._params = params
+# class LatencyEvaluator:
+#     def __init__(self, apply_fn, params):
+#         self._apply_fn = apply_fn
+#         self._params = params
 
-    def latency_fn(self):
-        def apply_fn(params, features):
-            return self._apply_fn({'params': params}, features)
-        return apply_fn
+#     def latency_fn(self):
+#         def apply_fn(params, features):
+#             return self._apply_fn({'params': params}, features)
+#         return apply_fn
 
-    def params(self):
-        return self._params
+#     def params(self):
+#         return self._params
 
 
 class LatencyModelTrainer:
@@ -264,4 +268,4 @@ class LatencyModelTrainer:
             self.train()
 
     def get_evaluator(self):
-        return LatencyEvaluator(self.net.apply, self.state.params)
+        return dict(module=self.net, params=self.state.params)
