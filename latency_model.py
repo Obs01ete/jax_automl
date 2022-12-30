@@ -152,18 +152,15 @@ def evaluate(
     return metrics, pred
 
 
-# class LatencyEvaluator:
-#     def __init__(self, apply_fn, params):
-#         self._apply_fn = apply_fn
-#         self._params = params
+@partial(jax.jit, static_argnums=(0,))
+def predict(
+    model, params, feature: jnp.ndarray
+):
+    pred = model.apply({'params': params}, feature)
+    return pred
 
-#     def latency_fn(self):
-#         def apply_fn(params, features):
-#             return self._apply_fn({'params': params}, features)
-#         return apply_fn
 
-#     def params(self):
-#         return self._params
+predict_flax = nn.jit(LatencyNet)
 
 
 class LatencyModelTrainer:
@@ -186,6 +183,11 @@ class LatencyModelTrainer:
         self.rng = jax.random.PRNGKey(43)
         self.state = init_train_state(
            self.net, self.rng, (self.batch_size, self.features.shape[1]), learning_rate)
+        
+        feature = jnp.ones((1, 2))
+        pred = predict(self.net, self.state.params, feature)
+
+        pred_flax = predict_flax().bind({'params': self.state.params})(feature)
 
         self.checkpoint_dir = f"checkpoint_{self.name}"
         print("")
@@ -279,4 +281,9 @@ class LatencyModelTrainer:
             self.train()
 
     def get_evaluator(self):
-        return dict(module=self.net, params=self.state.params)
+        return dict(
+            predict_fn=predict,
+            module=self.net,
+            params=self.state.params,
+            predict_flax=predict_flax(),
+            )

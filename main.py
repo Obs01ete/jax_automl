@@ -97,7 +97,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
     def make_static_ndarray(x):
         return static_ndarray(shape=x.shape, dtype=x.dtype, buffer=x.data)
 
-    def total_loss(features_arr, module, params):
+    def total_loss(predict_fn, params, features_arr):
         latencies = []
         weight_nums = []
         for i_layer in range(max_layers):
@@ -107,7 +107,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
             features_tuple = (feat_in, feat_out)
             features_np = jnp.expand_dims(jnp.array(features_tuple, dtype=jnp.float32), axis=0)
             # features_static = make_static_ndarray(np.array(features_tuple))
-            latency = module.apply({'params': params}, features_np)
+            latency = predict_fn.apply({'params': params}, features_np)
             latency = latency[0]
             latency = jnp.maximum(latency, 0)
             latencies.append(latency)
@@ -146,8 +146,10 @@ def gradient_automl(evaluator: Dict[str, Any]):
 
         return total_loss, aux
     
+    predict_fn = evaluator['predict_fn']
     module = evaluator['module']
     params = evaluator['params']
+    predict_flax = evaluator['predict_flax']
 
     # dense_class = nn.Dense
     # out_feat = 700
@@ -171,17 +173,19 @@ def gradient_automl(evaluator: Dict[str, Any]):
     
     static_params = jax.tree_util.tree_map(make_static_ndarray, params)
     # static_params = jax.tree_util.tree_map(lambda x: jnp.array(x), params)
+
+    args = (predict_flax, static_params, features_array)
     
-    tlv = total_loss(features_array, module, static_params)
+    tlv = total_loss(*args)
     
-    total_loss_jit = jax.jit(total_loss, static_argnums=(1, 2)) # static_argnums=(1, 2)
-    tljv = total_loss_jit(features_array, module, static_params)
+    total_loss_jit = jax.jit(total_loss, static_argnums=(0, 1)) # static_argnums=(1, 2)
+    tljv = total_loss_jit(*args)
 
     grad_fn = jax.jit(jax.value_and_grad(total_loss_jit, argnums=(0,), has_aux=True))
-    gfnv = grad_fn(features_array, module, static_params)
+    gfnv = grad_fn(*args)
 
     grad_fn_jit = jax.jit(grad_fn)
-    gfnjv = grad_fn_jit(features_array, module, static_params)
+    gfnjv = grad_fn_jit(*args)
 
     # def grad_fn_partial(features_arr):
     #     return grad_fn(features_arr, evaluator['apply_fn'], evaluator['params']) 
@@ -189,7 +193,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
-        (loss, aux_dict), (grad,) = grad_fn_jit(features_array, module, static_params)
+        (loss, aux_dict), (grad,) = grad_fn_jit(*args)
         grad_scaled_mimimize = - 5e+15 * np.array(grad)
         print(f"step={i_step} loss={loss.item():.6f}")
         aux_dict = {k: v.item() for k, v in aux_dict.items()}
