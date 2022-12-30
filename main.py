@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Iterable
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -21,7 +21,8 @@ def load_or_create_dataset():
     gpu = gpus[0]
 
     op_type = 'linear' # 'linear' 'conv2d'
-    dataset_name = f"{op_type}_data.json"
+    # dataset_name = f"{op_type}_data.json"
+    dataset_name = f"{op_type}_data_1k_.json" # TEMP
     if os.path.exists(dataset_name):
         with open(dataset_name, "r") as f:
             dataset = json.load(f)
@@ -66,8 +67,11 @@ def dataset_analytics(dataset):
     plt.show()
 
 
-def calc_weights(fin, fout):
-    return jnp.maximum(fin + 1, 0) * jnp.maximum(fout, 0)
+def calc_weights_leaky(fin, fout):
+    # result = jnp.maximum(fin + 1, 0) * jnp.maximum(fout, 0)
+    negative_slope = 1e-2
+    result = nn.leaky_relu(fin + 1, negative_slope) * nn.leaky_relu(fout, negative_slope)
+    return result
 
 
 def double_boundary_loss(values, min_value, max_value, min_slope=1.0, max_slope=1.0):
@@ -76,7 +80,37 @@ def double_boundary_loss(values, min_value, max_value, min_slope=1.0, max_slope=
         min_slope * jnp.maximum(0, (min_value - values) / min_value),
         )
 
-import flax
+
+class MLP(nn.Module):
+    in_feat: int
+    hidden_feat: Iterable[int]
+
+    @nn.compact
+    def __call__(self, x):
+        in_f = self.in_feat
+        for out_f in self.hidden_feat:
+            x = nn.relu(nn.Dense(in_f, out_f)(x))
+            in_f = out_f
+        return x
+
+
+def benchmark_features_array(input_features_size, features_array):
+    step = 16
+    int_features = (np.ceil(np.array(features_array) / step) * step).astype(np.int32)
+    joint_net = MLP(input_features_size, int_features)
+    example = jnp.ones((1000, 10))
+    joint_net_vars = joint_net.init(jax.random.PRNGKey(44), example)
+    # apply_fn = nn.jit(joint_net.apply)
+    # pred = apply_fn(joint_net, joint_net_vars, example)
+
+    flax_apply_jitted = jax.jit(lambda params, inputs: joint_net.apply(params, inputs))
+    pred = flax_apply_jitted(joint_net_vars, example)
+
+    for _ in range(5):
+        st = time.time()
+        pred = flax_apply_jitted(joint_net_vars, example).block_until_ready()
+        print(time.time() - st)
+
 
 def gradient_automl(evaluator: Dict[str, Any]):
     min_layers = 5
@@ -88,7 +122,9 @@ def gradient_automl(evaluator: Dict[str, Any]):
 
     input_features_size = 10
     features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + 300
-    features_array = features_array.at[-2].set(-1000) # TEMP
+    # features_array = features_array.at[-2].set(-1000) # TEMP
+
+    benchmark_features_array(input_features_size, features_array)
 
     class static_ndarray(np.ndarray):
         def __hash__(self):
@@ -116,28 +152,18 @@ def gradient_automl(evaluator: Dict[str, Any]):
             feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
             feat_out = features_arr[i_layer]
 
-            num_weights = calc_weights(feat_in, feat_out)
+            num_weights = calc_weights_leaky(feat_in, feat_out)
             weight_nums.append(num_weights)
 
         total_num_weights = jnp.sum(jnp.array(weight_nums))
         num_weights_loss = double_boundary_loss(total_num_weights, min_parameters, max_parameters)
 
-        # compactness_array = jnp.maximum(
-        #     jnp.maximum(features_array[1:], 0),
-        #     -jnp.minimum(features_array[:-1], 0)
-        # )
-        # compactness_array = jnp.sqrt(
-        #     jax.lax.clamp(0.0, features_array[1:], 1e+6) *
-        #     (-jax.lax.clamp(-1e+6, features_array[:-1], 0.0))
-        # )
-        # compactness_array = \
-        #     jax.nn.softplus(features_array[1:]) * \
-        #     jax.nn.softplus(-features_array[:-1])
-        # compactness_loss = jnp.sum(compactness_array) / jnp.sum(jnp.square(features_array))
-        compactness_loss = 0.0
+        compactness_array = jnp.maximum(features_arr[1:] - features_arr[:-1], 0)
+        compactness_loss = jnp.sum(compactness_array) / jnp.mean(jnp.square(features_arr))
+        # compactness_loss = 0.0
 
-        total_loss = 0.1 * num_weights_loss + 0.1 * compactness_loss
-        # total_loss = 10.0 * compactness_loss
+        total_loss = 0.1 * num_weights_loss + 100.0 * compactness_loss
+        # total_loss = 100.0 * compactness_loss
 
         aux = OrderedDict(
             total_num_weights=total_num_weights, num_weights_loss=num_weights_loss,
@@ -162,8 +188,11 @@ def gradient_automl(evaluator: Dict[str, Any]):
     # static_params = jax.tree_util.tree_map(make_static_ndarray, params)
     # static_params = jax.tree_util.tree_map(lambda x: jnp.array(x), params)
 
+    gpu = jax.devices("gpu")[0]
     lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, features_array)
-    lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_fn, argnums=(2,), has_aux=True))
+    latency_loss_jit_fn = nn.jit(latency_loss_fn, backend='gpu') # , device=gpu
+    lat_loss, lat_aux_dict = latency_loss_jit_fn(predict_flax, params, features_array)
+    lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_jit_fn, argnums=(2,), has_aux=True), backend='gpu') # , device=gpu
     llg, lat_aux_dict = lat_grad_fn(predict_flax, params, features_array)
 
     raw_latencies = predict_latencies(predict_flax, params, features_array)
@@ -187,11 +216,17 @@ def gradient_automl(evaluator: Dict[str, Any]):
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
+        st = time.time()
         (lat_loss, lat_aux_dict), (lat_grad,) = lat_grad_fn(predict_flax, params, features_array)
+        lat_loss.block_until_ready()
+        print(time.time() - st)
+        st = time.time()
         (rem_loss, rem_aux_dict), (rem_grad,) = rem_grad_fn_jit(features_array)
+        rem_loss.block_until_ready()
+        print(time.time() - st)
         total_grad = lat_grad + rem_grad
         grad_scaled_mimimize = - 5e+4 * np.array(total_grad)
-        print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={lat_loss.item():.6f}")
+        print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={rem_loss.item():.6f}")
         lat_aux_dict = {k: v.item() if v.shape == () else v for k, v in lat_aux_dict.items()}
         rem_aux_dict = {k: v.item() if v.shape == () else v for k, v in rem_aux_dict.items()}
         print(f"lat_aux_dict={lat_aux_dict}")
@@ -203,8 +238,11 @@ def gradient_automl(evaluator: Dict[str, Any]):
             pass
         features_array += grad_scaled_mimimize
         print(f"features_array={features_array.astype(np.int32)}")
+        benchmark_features_array(input_features_size, features_array)
 
     print(features_array)
+
+    benchmark_features_array(input_features_size, features_array)
 
     print("Automl done")    
 

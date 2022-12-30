@@ -135,7 +135,7 @@ class Operator:
     def benchmark(self):
         print(self.tensor_shape, self.op.specs)
         shape = self.tensor_shape
-        batch = 1000
+        batch = 1000 # HARDCODE
         tensor_shape = (batch, *shape.linearize())
         def _init():
             return self.op.init(self.rng_key, jnp.ones(tensor_shape))

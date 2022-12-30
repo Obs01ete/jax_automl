@@ -20,17 +20,6 @@ import optax
 
 class LatencyNet(nn.Module):
 
-    # def setup(self):
-    #     self.linear1 = nn.Dense(features=ch)
-    #     self.linear2 = nn.Dense(features=ch)
-    #     self.linear3 = nn.Dense(features=ch)
-    #     self.linear4 = nn.Dense(features=ch)
-    #     self.linear5 = nn.Dense(features=ch)
-    #     self.linear6 = nn.Dense(features=ch)
-    #     self.linear7 = nn.Dense(features=ch)
-    #     self.linear8 = nn.Dense(features=ch)
-    #     self.linear9 = nn.Dense(features=1)
-
     @nn.compact
     def __call__(self, x):
         ch = 128
@@ -58,10 +47,6 @@ class LatencyNet(nn.Module):
         x = 1e-3 * x
         x = x.squeeze(1)
         return x
-    
-    # @partial(jax.jit, static_argnums=0)
-    # def apply_dk(self, *args, **kwargs):
-    #     return self.apply(*args, **kwargs)
 
 
 def save_checkpoint(ckpt_path, state, epoch):
@@ -95,14 +80,6 @@ def total_loss(*, pred, label):
 
 def mape_metric(*, pred, label, smoothener=0.0):
     losses = jnp.abs(pred - label) / (label + smoothener)
-
-    # losses_aval = losses.aval
-    # print(losses_aval.shape)
-    # print(losses_aval)
-    # losses_np = np.asarray(losses_aval)
-    # print(losses_np.shape)
-    # print(type(losses_np))
-
     return losses.mean()
 
 
