@@ -20,30 +20,41 @@ import optax
 
 class LatencyNet(nn.Module):
 
-    def setup(self):
-        ch = 128
-        self.linear1 = nn.Dense(features=ch)
-        self.linear2 = nn.Dense(features=ch)
-        self.linear3 = nn.Dense(features=ch)
-        self.linear4 = nn.Dense(features=ch)
-        self.linear5 = nn.Dense(features=ch)
-        self.linear6 = nn.Dense(features=ch)
-        self.linear7 = nn.Dense(features=ch)
-        self.linear8 = nn.Dense(features=ch)
-        self.linear9 = nn.Dense(features=1)
+    # def setup(self):
+    #     self.linear1 = nn.Dense(features=ch)
+    #     self.linear2 = nn.Dense(features=ch)
+    #     self.linear3 = nn.Dense(features=ch)
+    #     self.linear4 = nn.Dense(features=ch)
+    #     self.linear5 = nn.Dense(features=ch)
+    #     self.linear6 = nn.Dense(features=ch)
+    #     self.linear7 = nn.Dense(features=ch)
+    #     self.linear8 = nn.Dense(features=ch)
+    #     self.linear9 = nn.Dense(features=1)
 
     @nn.compact
     def __call__(self, x):
+        ch = 128
+
+        linear1 = nn.Dense(features=ch)
+        linear2 = nn.Dense(features=ch)
+        linear3 = nn.Dense(features=ch)
+        linear4 = nn.Dense(features=ch)
+        linear5 = nn.Dense(features=ch)
+        linear6 = nn.Dense(features=ch)
+        linear7 = nn.Dense(features=ch)
+        linear8 = nn.Dense(features=ch)
+        linear9 = nn.Dense(features=1)
+        
         x = 1e-3 * x
-        x = nn.relu(self.linear1(x))
-        x = nn.relu(self.linear2(x))
-        x = nn.relu(self.linear3(x))
-        x = nn.relu(self.linear4(x))
-        x = nn.relu(self.linear5(x))
-        x = nn.relu(self.linear6(x))
-        x = nn.relu(self.linear7(x))
-        x = nn.relu(self.linear8(x))
-        x = self.linear9(x)
+        x = nn.relu(linear1(x))
+        x = nn.relu(linear2(x))
+        x = nn.relu(linear3(x))
+        x = nn.relu(linear4(x))
+        x = nn.relu(linear5(x))
+        x = nn.relu(linear6(x))
+        x = nn.relu(linear7(x))
+        x = nn.relu(linear8(x))
+        x = linear9(x)
         x = 1e-3 * x
         x = x.squeeze(1)
         return x

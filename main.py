@@ -5,9 +5,11 @@ from typing import Callable, Dict, Any
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from collections import OrderedDict
 
 import jax
 import jax.numpy as jnp
+import flax.linen as nn
 
 from benchmarking import create_dataset
 from latency_model import LatencyModelTrainer, LatencyNet
@@ -85,7 +87,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
     min_parameters = 0.5 * max_parameters
 
     input_features_size = 10
-    features_array = jnp.zeros((max_layers,), dtype=np.float32) + 300
+    features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + 300
     features_array = features_array.at[-2].set(-1000) # TEMP
 
     class static_ndarray(np.ndarray):
@@ -95,7 +97,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
     def make_static_ndarray(x):
         return static_ndarray(shape=x.shape, dtype=x.dtype, buffer=x.data)
 
-    def total_loss(features_arr, net_forward, evaluator_params):
+    def total_loss(features_arr, module, params):
         latencies = []
         weight_nums = []
         for i_layer in range(max_layers):
@@ -103,9 +105,10 @@ def gradient_automl(evaluator: Dict[str, Any]):
             feat_out = features_arr[i_layer]
 
             features_tuple = (feat_in, feat_out)
-            # features_jnp = jnp.expand_dims(jnp.array(features_tuple), axis=0)
-            features_static = make_static_ndarray(np.array(features_tuple))
-            latency = net_forward(features_static)
+            features_np = jnp.expand_dims(jnp.array(features_tuple, dtype=jnp.float32), axis=0)
+            # features_static = make_static_ndarray(np.array(features_tuple))
+            latency = module.apply({'params': params}, features_np)
+            latency = latency[0]
             latency = jnp.maximum(latency, 0)
             latencies.append(latency)
 
@@ -131,31 +134,54 @@ def gradient_automl(evaluator: Dict[str, Any]):
             jax.nn.softplus(-features_array[:-1])
         compactness_loss = jnp.sum(compactness_array) / jnp.sum(jnp.square(features_array))
 
-        # total_loss = latency_loss + 0.1 * num_weights_loss + 10.0 * compactness_loss
-        total_loss = 10.0 * compactness_loss
+        total_loss = latency_loss + 0.1 * num_weights_loss + 10.0 * compactness_loss
+        # total_loss = 10.0 * compactness_loss
 
         # print(f"latency_loss={latency_loss.item()} num_weights_loss={num_weights_loss.item()}")
 
-        # aux = dict(total_latency=total_latency, latency_loss=latency_loss,
-        #     total_num_weights=total_num_weights, num_weights_loss=num_weights_loss,
-        #     compactness_loss=compactness_loss)
-        aux = dict(compactness_loss=compactness_loss)
+        aux = OrderedDict(total_latency=total_latency, latency_loss=latency_loss,
+            total_num_weights=total_num_weights, num_weights_loss=num_weights_loss,
+            compactness_loss=compactness_loss)
+        # aux = OrderedDict(compactness_loss=compactness_loss)
 
         return total_loss, aux
     
+    module = evaluator['module']
     params = evaluator['params']
 
+    # dense_class = nn.Dense
+    # out_feat = 700
+    # x = np.ones((100, 600))
+
+    # dense_inst = dense_class(out_feat, name=f'layers_7')
+    # dense_vars = dense_inst.init(jax.random.PRNGKey(0), x)
+    # dense_inst = dense_inst.bind(dense_vars)
+    # y = dense_inst(x).block_until_ready()
+    # st = time.time()
+    # for _ in range(10):
+    #     y = dense_inst(x).block_until_ready()
+    # print(time.time() - st)
+
+    # jitted_call = jax.jit(lambda params, inputs: dense_inst.apply(params, inputs))
+    # y = jitted_call(dense_vars, x)
+    # st = time.time()
+    # for _ in range(10):
+    #     y = jitted_call(dense_vars, x).block_until_ready()
+    # print(time.time() - st)
+    
     static_params = jax.tree_util.tree_map(make_static_ndarray, params)
+    # static_params = jax.tree_util.tree_map(lambda x: jnp.array(x), params)
     
-    net_forward = jax.jit(lambda x: LatencyNet.__call__(evaluator['module'], static_params, x), static_argnums=(0, 1))
+    tlv = total_loss(features_array, module, static_params)
     
-    total_loss(features_array, net_forward, static_params)
-    
-    total_loss_jit = jax.jit(total_loss, static_argnums=(1, 2))
+    total_loss_jit = jax.jit(total_loss, static_argnums=(1, 2)) # static_argnums=(1, 2)
+    tljv = total_loss_jit(features_array, module, static_params)
 
     grad_fn = jax.jit(jax.value_and_grad(total_loss_jit, argnums=(0,), has_aux=True))
+    gfnv = grad_fn(features_array, module, static_params)
 
     grad_fn_jit = jax.jit(grad_fn)
+    gfnjv = grad_fn_jit(features_array, module, static_params)
 
     # def grad_fn_partial(features_arr):
     #     return grad_fn(features_arr, evaluator['apply_fn'], evaluator['params']) 
@@ -163,8 +189,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
-        (loss, aux_dict), (grad,) = grad_fn_jit(features_array,
-            evaluator['module'], evaluator['params'])
+        (loss, aux_dict), (grad,) = grad_fn_jit(features_array, module, static_params)
         grad_scaled_mimimize = - 5e+15 * np.array(grad)
         print(f"step={i_step} loss={loss.item():.6f}")
         aux_dict = {k: v.item() for k, v in aux_dict.items()}
