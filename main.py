@@ -81,7 +81,7 @@ import flax
 def gradient_automl(evaluator: Dict[str, Any]):
     min_layers = 5
     max_layers = 10
-    max_latency_sec = 0.001
+    max_latency_sec = 0.002
     min_latency_sec = 0.75 * max_latency_sec
     max_parameters = 4_000_000
     min_parameters = 0.5 * max_parameters
@@ -97,26 +97,27 @@ def gradient_automl(evaluator: Dict[str, Any]):
     def make_static_ndarray(x):
         return static_ndarray(shape=x.shape, dtype=x.dtype, buffer=x.data)
 
-    def total_loss(predict_fn, params, features_arr):
-        latencies = []
-        weight_nums = []
+    def predict_latencies(predict_fn, params, features_arr):
+        feature_tuples = []
         for i_layer in range(max_layers):
             feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
             feat_out = features_arr[i_layer]
 
             features_tuple = (feat_in, feat_out)
-            features_np = jnp.expand_dims(jnp.array(features_tuple, dtype=jnp.float32), axis=0)
-            # features_static = make_static_ndarray(np.array(features_tuple))
-            latency = predict_fn.apply({'params': params}, features_np)
-            latency = latency[0]
-            latency = jnp.maximum(latency, 0)
-            latencies.append(latency)
+            feature_tuples.append(features_tuple)
+
+        features_jnp = jnp.array(feature_tuples)
+        raw_latencies = predict_fn.apply({'params': params}, features_jnp)
+        return raw_latencies
+    
+    def rem_loss_fn(features_arr):
+        weight_nums = []
+        for i_layer in range(max_layers):
+            feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
+            feat_out = features_arr[i_layer]
 
             num_weights = calc_weights(feat_in, feat_out)
             weight_nums.append(num_weights)
-
-        total_latency = jnp.sum(jnp.array(latencies))
-        latency_loss = double_boundary_loss(total_latency, min_latency_sec, max_latency_sec)
 
         total_num_weights = jnp.sum(jnp.array(weight_nums))
         num_weights_loss = double_boundary_loss(total_num_weights, min_parameters, max_parameters)
@@ -129,75 +130,72 @@ def gradient_automl(evaluator: Dict[str, Any]):
         #     jax.lax.clamp(0.0, features_array[1:], 1e+6) *
         #     (-jax.lax.clamp(-1e+6, features_array[:-1], 0.0))
         # )
-        compactness_array = \
-            jax.nn.softplus(features_array[1:]) * \
-            jax.nn.softplus(-features_array[:-1])
-        compactness_loss = jnp.sum(compactness_array) / jnp.sum(jnp.square(features_array))
+        # compactness_array = \
+        #     jax.nn.softplus(features_array[1:]) * \
+        #     jax.nn.softplus(-features_array[:-1])
+        # compactness_loss = jnp.sum(compactness_array) / jnp.sum(jnp.square(features_array))
+        compactness_loss = 0.0
 
-        total_loss = latency_loss + 0.1 * num_weights_loss + 10.0 * compactness_loss
+        total_loss = 0.1 * num_weights_loss + 0.1 * compactness_loss
         # total_loss = 10.0 * compactness_loss
 
-        # print(f"latency_loss={latency_loss.item()} num_weights_loss={num_weights_loss.item()}")
-
-        aux = OrderedDict(total_latency=total_latency, latency_loss=latency_loss,
+        aux = OrderedDict(
             total_num_weights=total_num_weights, num_weights_loss=num_weights_loss,
             compactness_loss=compactness_loss)
-        # aux = OrderedDict(compactness_loss=compactness_loss)
 
         return total_loss, aux
     
+    def latency_loss_fn(predict_fn, params, features_arr):
+        raw_latencies = predict_latencies(predict_fn, params, features_arr)
+        latencies = jnp.maximum(raw_latencies, 0)
+        total_latency = jnp.sum(latencies)
+        latency_loss = double_boundary_loss(total_latency, min_latency_sec, max_latency_sec)
+        aux = OrderedDict(total_latency=total_latency, latency_loss=latency_loss,
+            raw_latencies=raw_latencies)
+        return latency_loss, aux
+
     predict_fn = evaluator['predict_fn']
     module = evaluator['module']
     params = evaluator['params']
     predict_flax = evaluator['predict_flax']
 
-    # dense_class = nn.Dense
-    # out_feat = 700
-    # x = np.ones((100, 600))
-
-    # dense_inst = dense_class(out_feat, name=f'layers_7')
-    # dense_vars = dense_inst.init(jax.random.PRNGKey(0), x)
-    # dense_inst = dense_inst.bind(dense_vars)
-    # y = dense_inst(x).block_until_ready()
-    # st = time.time()
-    # for _ in range(10):
-    #     y = dense_inst(x).block_until_ready()
-    # print(time.time() - st)
-
-    # jitted_call = jax.jit(lambda params, inputs: dense_inst.apply(params, inputs))
-    # y = jitted_call(dense_vars, x)
-    # st = time.time()
-    # for _ in range(10):
-    #     y = jitted_call(dense_vars, x).block_until_ready()
-    # print(time.time() - st)
-    
-    static_params = jax.tree_util.tree_map(make_static_ndarray, params)
+    # static_params = jax.tree_util.tree_map(make_static_ndarray, params)
     # static_params = jax.tree_util.tree_map(lambda x: jnp.array(x), params)
 
-    args = (predict_flax, static_params, features_array)
+    lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, features_array)
+    lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_fn, argnums=(2,), has_aux=True))
+    llg, lat_aux_dict = lat_grad_fn(predict_flax, params, features_array)
+
+    raw_latencies = predict_latencies(predict_flax, params, features_array)
+    # predict_latencies_grad = jax.grad(predict_latencies, argnums=(2,))
+    # plg = predict_latencies_grad(predict_flax, params, features_array)
+
+    tlv = rem_loss_fn(features_array)
     
-    tlv = total_loss(*args)
-    
-    total_loss_jit = jax.jit(total_loss, static_argnums=(0, 1)) # static_argnums=(1, 2)
-    tljv = total_loss_jit(*args)
+    rem_loss_jit_fn = jax.jit(rem_loss_fn) # static_argnums=(1, 2)
+    tljv = rem_loss_jit_fn(features_array)
 
-    grad_fn = jax.jit(jax.value_and_grad(total_loss_jit, argnums=(0,), has_aux=True))
-    gfnv = grad_fn(*args)
+    rem_grad_fn = jax.value_and_grad(rem_loss_jit_fn, argnums=(0,), has_aux=True)
+    gfnv = rem_grad_fn(features_array)
 
-    grad_fn_jit = jax.jit(grad_fn)
-    gfnjv = grad_fn_jit(*args)
+    rem_grad_fn_jit = jax.jit(rem_grad_fn)
+    gfnjv = rem_grad_fn_jit(features_array)
 
-    # def grad_fn_partial(features_arr):
-    #     return grad_fn(features_arr, evaluator['apply_fn'], evaluator['params']) 
+    # from jax.test_util import check_grads
+    # check_grads(rem_loss, (features_array,), order=1)
 
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
-        (loss, aux_dict), (grad,) = grad_fn_jit(*args)
-        grad_scaled_mimimize = - 5e+15 * np.array(grad)
-        print(f"step={i_step} loss={loss.item():.6f}")
-        aux_dict = {k: v.item() for k, v in aux_dict.items()}
-        print(f"aux_dict={aux_dict}")
+        (lat_loss, lat_aux_dict), (lat_grad,) = lat_grad_fn(predict_flax, params, features_array)
+        (rem_loss, rem_aux_dict), (rem_grad,) = rem_grad_fn_jit(features_array)
+        total_grad = lat_grad + rem_grad
+        grad_scaled_mimimize = - 5e+4 * np.array(total_grad)
+        print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={lat_loss.item():.6f}")
+        lat_aux_dict = {k: v.item() if v.shape == () else v for k, v in lat_aux_dict.items()}
+        rem_aux_dict = {k: v.item() if v.shape == () else v for k, v in rem_aux_dict.items()}
+        print(f"lat_aux_dict={lat_aux_dict}")
+        print(f"rem_aux_dict={rem_aux_dict}")
         print(f"grad={grad_scaled_mimimize}")
         if jnp.mean(jnp.abs(grad_scaled_mimimize)).item() < 1e-6:
             # print("Grads are zero. Early stopping.")
