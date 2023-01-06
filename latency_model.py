@@ -161,10 +161,10 @@ class LatencyModelTrainer:
         self.state = init_train_state(
            self.net, self.rng, (self.batch_size, self.features.shape[1]), learning_rate)
         
-        feature = jnp.ones((1, 2))
-        pred = predict(self.net, self.state.params, feature)
+        # feature = jnp.ones((1, 2))
+        # pred = predict(self.net, self.state.params, feature)
 
-        pred_flax = predict_flax().bind({'params': self.state.params})(feature)
+        # pred_flax = predict_flax().bind({'params': self.state.params})(feature)
 
         self.checkpoint_dir = f"checkpoint_{self.name}"
         print("")

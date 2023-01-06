@@ -62,7 +62,9 @@ class ConvOpSpecs:
 
         step = 4
         h, w = np_rng.choice(list(range(step, 256, step)), size=(2,))
+        h, w = (int(v) for v in (h, w))
         k, c = np_rng.choice(list(range(step, 512, step)), size=(2,))
+        k, c = (int(v) for v in (k, c))
 
         # r = np_rng.choice((1, 3, 5))
         # s = np_rng.choice((1, 3, 5))
@@ -71,7 +73,7 @@ class ConvOpSpecs:
         
         r = 3
         s = 3
-        stride = np_rng.choice((1, 2))
+        stride = int(np_rng.choice((1, 2)))
         u = stride
         v = stride
         
@@ -206,6 +208,7 @@ def create_dataset(device, op_type, num_samples):
                 value = group_dict[key]
                 feature_names.append(feature_name)
                 features.append(value)
+        assert all([type(f) is int for f in features])
         if common_feature_names is None:
             common_feature_names = feature_names
         if feature_names != common_feature_names:

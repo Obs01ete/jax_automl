@@ -26,7 +26,7 @@ def load_or_create_dataset(
     gpu = gpus[0]
 
     dataset_name = f"{op_type}_data.json"
-    # dataset_name = f"{op_type}_data_1k_.json" # TEMP
+    # dataset_name = f"{op_type}_data_1k.json" # TEMP
     if os.path.exists(dataset_name):
         with open(dataset_name, "r") as f:
             dataset = json.load(f)
@@ -253,7 +253,7 @@ def gradient_automl(evaluator: Dict[str, Any]):
 def main():
 
     op_type = 'conv2d'
-    num_samples = 1000 # 20000 # 1000
+    num_samples = 20000 # 20000 # 1000
 
     dataset = load_or_create_dataset(op_type, num_samples)
 
