@@ -15,19 +15,22 @@ from benchmarking import create_dataset
 from latency_model import LatencyModelTrainer, LatencyNet
 
 
-def load_or_create_dataset():
+def load_or_create_dataset(
+    op_type = 'linear',
+    num_samples = 1000,
+):
+    assert op_type in ('linear', 'conv2d')
+
     # cpus = jax.devices("cpu")
     gpus = jax.devices("gpu")
     gpu = gpus[0]
 
-    op_type = 'linear' # 'linear' 'conv2d'
-    # dataset_name = f"{op_type}_data.json"
-    dataset_name = f"{op_type}_data_1k_.json" # TEMP
+    dataset_name = f"{op_type}_data.json"
+    # dataset_name = f"{op_type}_data_1k_.json" # TEMP
     if os.path.exists(dataset_name):
         with open(dataset_name, "r") as f:
             dataset = json.load(f)
     else:
-        num_samples = 20000 # 1000
         print(f"Measuring {num_samples} samples")
         time_start = time.time()
         dataset = create_dataset(gpu, op_type, num_samples)
@@ -249,12 +252,15 @@ def gradient_automl(evaluator: Dict[str, Any]):
 
 def main():
 
-    dataset = load_or_create_dataset()
+    op_type = 'conv2d'
+    num_samples = 1000 # 20000 # 1000
+
+    dataset = load_or_create_dataset(op_type, num_samples)
 
     if False:
         dataset_analytics(dataset)
 
-    trainer = LatencyModelTrainer(dataset)
+    trainer = LatencyModelTrainer(dataset, op_type)
     trainer.load_or_train()
     # trainer.evaluate()
 

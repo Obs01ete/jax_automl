@@ -33,20 +33,22 @@ class LinearSpecs:
 
 @dataclass(frozen=True)
 class Tensor3DSpecs(Linearizable):
+    n: int # batch size
     h: int # tensor height
     w: int # tensor width
     c: int # ch_in
 
     def linearize(self):
-        return (self.h, self.w, self.c)
+        return (self.n, self.h, self.w, self.c)
 
 
 @dataclass(frozen=True)
 class Tensor1DSpecs(Linearizable):
+    n: int # batch size
     f: int # features (neurons)
 
     def linearize(self):
-        return (self.f,)
+        return (self.n, self.f)
 
 
 class ConvOpSpecs:
@@ -56,15 +58,24 @@ class ConvOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        h, w = np_rng.choice(list(range(4, 256, 4)), size=(2,))
-        k, c = np_rng.choice(list(range(4, 512, 4)), size=(2,))
-        # h, w = 512, 512
-        # k, c = 128, np_rng.choice(list(range(4, 512, 4)))
-        r = np_rng.choice((1, 3, 5))
-        s = np_rng.choice((1, 3, 5))
-        u = np_rng.choice((1, 2))
-        v = np_rng.choice((1, 2))
-        ts = Tensor3DSpecs(h, w, c)
+        batch = 1
+
+        step = 4
+        h, w = np_rng.choice(list(range(step, 256, step)), size=(2,))
+        k, c = np_rng.choice(list(range(step, 512, step)), size=(2,))
+
+        # r = np_rng.choice((1, 3, 5))
+        # s = np_rng.choice((1, 3, 5))
+        # u = np_rng.choice((1, 2))
+        # v = np_rng.choice((1, 2))
+        
+        r = 3
+        s = 3
+        stride = np_rng.choice((1, 2))
+        u = stride
+        v = stride
+        
+        ts = Tensor3DSpecs(batch, h, w, c)
         cs =  ConvSpecs(k, r, s, u, v)
         os = cls(ts, cs)
         return os
@@ -77,7 +88,7 @@ class LinearOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        # fi, fo = np_rng.choice(list(range(16, 4096, 16)), size=(2,))
+        batch = 1000 # ATTENTION (!)
         max_features = 4096
         step = 16
         fifo = np_rng.exponential(scale=max_features//2, size=(2,))
@@ -86,8 +97,7 @@ class LinearOpSpecs:
         fifo[fifo <= 0] = 1
         fifo = (fifo * step).astype(np.int32)
         fi, fo = (int(v) for v in fifo)
-        # fi, fo = 512, 1024
-        ts = Tensor1DSpecs(fi)
+        ts = Tensor1DSpecs(batch, fi)
         cs = LinearSpecs(fo)
         os = cls(ts, cs)
         return os
@@ -134,9 +144,7 @@ class Operator:
 
     def benchmark(self):
         print(self.tensor_shape, self.op.specs)
-        shape = self.tensor_shape
-        batch = 1000 # HARDCODE
-        tensor_shape = (batch, *shape.linearize())
+        tensor_shape = self.tensor_shape.linearize()
         def _init():
             return self.op.init(self.rng_key, jnp.ones(tensor_shape))
         variables = _init()
