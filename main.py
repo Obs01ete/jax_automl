@@ -25,8 +25,9 @@ def load_or_create_dataset(
     gpus = jax.devices("gpu")
     gpu = gpus[0]
 
-    dataset_name = f"{op_type}_data.json"
-    # dataset_name = f"{op_type}_data_1k.json" # TEMP
+    # dataset_name = f"{op_type}_data.json"
+    dataset_name = f"{op_type}_data_11k.json" # TEMP
+
     if os.path.exists(dataset_name):
         with open(dataset_name, "r") as f:
             dataset = json.load(f)
@@ -45,6 +46,7 @@ def load_or_create_dataset(
 def dataset_analytics(dataset):
     latencies = [r['target'] for r in dataset['dataset']]
     features = np.array([r['features'] for r in dataset['dataset']])
+    feature_names = dataset['feature_names']
 
     # plt.figure()
     # plt.hist(latencies, bins=200)
@@ -65,9 +67,17 @@ def dataset_analytics(dataset):
     # plt.show()
 
     plt.figure()
-    plt.scatter(features[:, 0]*features[:, 1], latencies, marker='.')
+    if len(feature_names) == 2:
+        plt.scatter(features[:, 0]*features[:, 1], latencies, marker='.')
+    else:
+        flops = np.product(features[:, :7], axis=-1) / np.product(features[:, 7:], axis=-1)
+        plt.scatter(flops, latencies, marker='.')
+    plt.xlabel("FLOPs")
+    plt.ylabel("latency sec")
     plt.grid()
     plt.show()
+    
+    print("")
 
 
 def calc_weights_leaky(fin, fout):
@@ -115,7 +125,7 @@ def benchmark_features_array(input_features_size, features_array):
         print(time.time() - st)
 
 
-def gradient_automl(evaluator: Dict[str, Any]):
+def gradient_automl_linear(evaluator: Dict[str, Any]):
     min_layers = 5
     max_layers = 10
     max_latency_sec = 0.002
@@ -250,6 +260,10 @@ def gradient_automl(evaluator: Dict[str, Any]):
     print("Automl done")    
 
 
+def gradient_automl_conv2d(evaluator):
+    pass
+
+
 def main():
 
     op_type = 'conv2d'
@@ -264,7 +278,10 @@ def main():
     trainer.load_or_train()
     # trainer.evaluate()
 
-    gradient_automl(trainer.get_evaluator())
+    if op_type == 'linear':
+        gradient_automl_linear(trainer.get_evaluator())
+    else:
+        gradient_automl_conv2d(trainer.get_evaluator())
 
     print("Done")
 

@@ -213,6 +213,10 @@ def create_dataset(device, op_type, num_samples):
             common_feature_names = feature_names
         if feature_names != common_feature_names:
             print("Error: different features")
-        latency = op.benchmark()
+        try:
+            latency = op.benchmark()
+        except:
+            print("Sample failed")
+            continue
         measurement_list.append(dict(features=features, target=latency))
     return dict(dataset=measurement_list, feature_names=common_feature_names)
