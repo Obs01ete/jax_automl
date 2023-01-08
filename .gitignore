@@ -1,1 +1,3 @@
-.vscode/
+*.json
+checkpoint_*
+__pycache__
