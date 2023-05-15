@@ -49,8 +49,8 @@ def load_or_create_dataset(
     gpus = jax.devices("gpu")
     gpu = gpus[0]
 
-    # dataset_name = f"{op_type}_data.json"
-    dataset_name = f"{op_type}_data_11k.json" # TEMP
+    dataset_name = f"{op_type}_data.json"
+    # dataset_name = f"{op_type}_data_11k.json" # TEMP
 
     if os.path.exists(dataset_name):
         with open(dataset_name, "r") as f:

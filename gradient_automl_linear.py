@@ -8,19 +8,13 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from losses import double_boundary_loss
+
 
 def calc_weights_leaky(fin, fout):
-    # result = jnp.maximum(fin + 1, 0) * jnp.maximum(fout, 0)
     negative_slope = 1e-2
     result = nn.leaky_relu(fin + 1, negative_slope) * nn.leaky_relu(fout, negative_slope)
     return result
-
-
-def double_boundary_loss(values, min_value, max_value, min_slope=1.0, max_slope=1.0):
-    return jnp.maximum(
-        max_slope * jnp.maximum(0, (values - max_value) / max_value),
-        min_slope * jnp.maximum(0, (min_value - values) / min_value),
-        )
 
 
 class MLP(nn.Module):
