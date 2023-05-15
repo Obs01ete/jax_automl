@@ -19,7 +19,7 @@ from gradient_automl_conv2d import gradient_automl_conv2d
 
 def main():
 
-    op_type = 'conv2d'
+    op_type = 'linear' # 'conv2d'
     num_samples = 20000 # 20000 # 1000
 
     dataset = load_or_create_dataset(op_type, num_samples)

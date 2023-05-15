@@ -45,7 +45,7 @@ def benchmark_features_array(input_features_size, features_array):
     for _ in range(5):
         st = time.time()
         pred = flax_apply_jitted(joint_net_vars, example).block_until_ready()
-        print(time.time() - st)
+        print(f"time {time.time() - st:.6f} sec")
 
 
 def gradient_automl_linear(evaluator: Dict[str, Any]):
@@ -60,7 +60,7 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
     features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + 300
     # features_array = features_array.at[-2].set(-1000) # TEMP
 
-    benchmark_features_array(input_features_size, features_array)
+    # benchmark_features_array(input_features_size, features_array)
 
     class static_ndarray(np.ndarray):
         def __hash__(self):
@@ -128,8 +128,8 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
     lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, features_array)
     latency_loss_jit_fn = nn.jit(latency_loss_fn, backend='gpu') # , device=gpu
     lat_loss, lat_aux_dict = latency_loss_jit_fn(predict_flax, params, features_array)
-    lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_jit_fn, argnums=(2,), has_aux=True), backend='gpu') # , device=gpu
-    llg, lat_aux_dict = lat_grad_fn(predict_flax, params, features_array)
+    lat_grad_jit_fn = nn.jit(jax.value_and_grad(latency_loss_jit_fn, argnums=(2,), has_aux=True), backend='gpu') # , device=gpu
+    llg, lat_aux_dict = lat_grad_jit_fn(predict_flax, params, features_array)
 
     raw_latencies = predict_latencies(predict_flax, params, features_array)
     # predict_latencies_grad = jax.grad(predict_latencies, argnums=(2,))
@@ -151,33 +151,86 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
 
     print("Optimizing parameters")
 
-    for i_step in tqdm(range(100)):
-        st = time.time()
-        (lat_loss, lat_aux_dict), (lat_grad,) = lat_grad_fn(predict_flax, params, features_array)
-        lat_loss.block_until_ready()
-        print(time.time() - st)
-        st = time.time()
-        (rem_loss, rem_aux_dict), (rem_grad,) = rem_grad_fn_jit(features_array)
-        rem_loss.block_until_ready()
-        print(time.time() - st)
-        total_grad = lat_grad + rem_grad
-        grad_scaled_mimimize = - 5e+4 * np.array(total_grad)
-        print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={rem_loss.item():.6f}")
-        lat_aux_dict = {k: v.item() if v.shape == () else v for k, v in lat_aux_dict.items()}
-        rem_aux_dict = {k: v.item() if v.shape == () else v for k, v in rem_aux_dict.items()}
-        print(f"lat_aux_dict={lat_aux_dict}")
-        print(f"rem_aux_dict={rem_aux_dict}")
-        print(f"grad={grad_scaled_mimimize}")
-        if jnp.mean(jnp.abs(grad_scaled_mimimize)).item() < 1e-6:
-            # print("Grads are zero. Early stopping.")
-            # break
-            pass
-        features_array += grad_scaled_mimimize
-        print(f"features_array={features_array.astype(np.int32)}")
-        benchmark_features_array(input_features_size, features_array)
+    # for i_step in tqdm(range(100)):
+    #     st = time.time()
+    #     (lat_loss, lat_aux_dict), (lat_grad,) = lat_grad_fn(predict_flax, params, features_array)
+    #     lat_loss.block_until_ready()
+    #     print(time.time() - st)
+    #     st = time.time()
+    #     (rem_loss, rem_aux_dict), (rem_grad,) = rem_grad_fn_jit(features_array)
+    #     rem_loss.block_until_ready()
+    #     print(time.time() - st)
+    #     total_grad = lat_grad + rem_grad
+    #     grad_scaled_mimimize = - 5e+4 * np.array(total_grad)
+    #     print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={rem_loss.item():.6f}")
+    #     lat_aux_dict = {k: v.item() if v.shape == () else v for k, v in lat_aux_dict.items()}
+    #     rem_aux_dict = {k: v.item() if v.shape == () else v for k, v in rem_aux_dict.items()}
+    #     print(f"lat_aux_dict={lat_aux_dict}")
+    #     print(f"rem_aux_dict={rem_aux_dict}")
+    #     print(f"grad={grad_scaled_mimimize}")
+    #     if jnp.mean(jnp.abs(grad_scaled_mimimize)).item() < 1e-6:
+    #         # print("Grads are zero. Early stopping.")
+    #         # break
+    #         pass
+    #     features_array += grad_scaled_mimimize
+    #     print(f"features_array={features_array.astype(np.int32)}")
+    #     benchmark_features_array(input_features_size, features_array)
+    
+    # import scipy
+    from scipy.optimize import minimize
 
-    print(features_array)
+    def cp_value(feature_vector: np.ndarray) -> np.ndarray:
+        lat_loss, _ = latency_loss_jit_fn(predict_flax, params, feature_vector)
+        rem_loss, _ = rem_loss_jit_fn(feature_vector)
+        total_loss = lat_loss + rem_loss
+        total_loss_np = np.array(total_loss)
+        return total_loss_np.item()
+    
+    def cp_jacobian(feature_vector: np.ndarray) -> np.ndarray:
+        _, (lg,) = lat_grad_jit_fn(predict_flax, params, feature_vector)
+        _, (rg,) = rem_grad_fn_jit(feature_vector)
+        total_grad = lg + rg
+        total_grad_np = np.array(total_grad)
+        return total_grad_np.tolist()
+    
+    # features_array_np = np.array(features_array)
+    # cpv = cp_value(features_array_np)
+    # cpj = cp_jacobian(features_array_np)
 
-    benchmark_features_array(input_features_size, features_array)
+    def print_progress(current_vector):
+        print(f"Features {[int(v) for v in current_vector.tolist()]}")
+        return False
+    
+    CH_MAX = 512
+
+    results = []
+    for i_outer in range(5):
+        random_features_np = np.random.random((len(features_array))) * CH_MAX
+
+        res = minimize(
+            cp_value,
+            random_features_np,
+            method='L-BFGS-B',
+            jac=cp_jacobian,
+            bounds=[(1, CH_MAX) for _ in range(len(random_features_np))],
+            options=dict(maxiter=20),
+            callback=print_progress,
+            )
+
+        print(res)
+        results.append(res)
+
+        print(">>>")
+        benchmark_features_array(input_features_size, random_features_np)
+        print("===")
+        benchmark_features_array(input_features_size, res.x)
+        print("<<<")
+
+
+    print(results)
+    for res in results:
+        print("---------------------------------------")
+        print_progress(res.x)
+    print("---------------------------------------")
 
     print("Automl done")    
