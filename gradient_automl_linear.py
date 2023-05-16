@@ -95,15 +95,48 @@ def proposal_analytics(input_features_size, features_array, constraints, latency
     print(f"predicted {predicted_lat:.6f} measured {measured_lat:.6f} sec, {constraints['latency_sec']}")
     print(f"num_weights {num_weights}, {constraints['parameters']}")
 
-    return dict(predicted_lat=predicted_lat, measured_lat=measured_lat)
+    return dict(predicted_lat=predicted_lat, measured_lat=measured_lat, num_weights=num_weights)
+
+
+def visualize_results(lat_dicts, seed_lat_dicts, test_lat_dicts, constraints):
+    def transpose_list_dict(ld):
+        return {k: [d[k] for d in ld] for k in ld[0].keys()}
+
+    opt_dict = transpose_list_dict(lat_dicts)
+    seed_dict = transpose_list_dict(seed_lat_dicts)
+    test_dict = transpose_list_dict(test_lat_dicts)
+
+    import matplotlib.pyplot as plt
+    plt.figure()
+    # pred_lats = [v['predicted_lat'] for v in lat_dicts]
+    # measured_lats = [v['measured_lat'] for v in lat_dicts]
+    # weights_qty = [v['num_weights'] for v in lat_dicts]
+    plt.scatter(opt_dict['predicted_lat'], opt_dict['measured_lat'])
+    plt.xlabel('pred_lats')
+    plt.ylabel('measured_lats')
+    plt.savefig('pred_vs_measured.png')
+
+    plt.figure()
+    x0 = constraints['parameters']['min']
+    x1 = constraints['parameters']['max']
+    y0 = constraints['latency_sec']['min']
+    y1 = constraints['latency_sec']['max']
+    plt.scatter(opt_dict['num_weights'], opt_dict['predicted_lat'], c='blue', label='optimized points')
+    plt.scatter(seed_dict['num_weights'], seed_dict['predicted_lat'], c='gray', label='seed points')
+    plt.scatter(test_dict['num_weights'], test_dict['predicted_lat'], c='red', label='known solution')
+    plt.plot([x0, x0, x1, x1, x0], [y0, y1, y1, y0, y0], 'g--', label='target region')
+    plt.xlabel('num_parameters')
+    plt.ylabel('predicted_lats')
+    plt.legend()
+    plt.savefig('target_region.png')
 
 
 def gradient_automl_linear(evaluator: Dict[str, Any]):
     min_layers = 5
-    max_layers = 10
+    max_layers = 20 # 10
     max_latency_sec = 0.002
     min_latency_sec = 0.75 * max_latency_sec
-    max_parameters = 3_000_000
+    max_parameters = 1_000_000
     min_parameters = 0.5 * max_parameters
     constraints = dict(
         latency_sec=dict(min=min_latency_sec, max=max_latency_sec),
@@ -167,11 +200,14 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
     from functools import partial
     total_latency_eval_fn = partial(total_latency_fn, predict_flax, params)
     
-    test_features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + 512
-    test_features_array = test_features_array.at[-3].set(-1000)
+    test_lat_dicts = []
+    for i_pos in range(4, 8):
+        test_features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + 512
+        test_features_array = test_features_array.at[i_pos].set(-1000)
 
-    print("For", np.array(test_features_array))
-    proposal_analytics(input_features_size, test_features_array, constraints, total_latency_eval_fn)    
+        print("For", np.array(test_features_array))
+        test_lat_dicts.append(proposal_analytics(input_features_size, test_features_array,
+            constraints, total_latency_eval_fn))
 
     gpu = jax.devices("gpu")[0]
     lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, test_features_array)
@@ -216,17 +252,22 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
 
     bounds = [(-CH_MAX, CH_MAX) for _ in range(max_layers)]
 
-    num_outer_iters = 5
+    fast = False
+
+    num_outer_iters = 1 if fast else 15
 
     latin_hypercube = LatinHypercube(max_layers)
     seed_points_np = latin_hypercube.random(num_outer_iters) * (CH_MAX - 1) + 1
 
     results = []
     lat_dicts = []
+    seed_lat_dicts = []
     for i_outer in range(num_outer_iters):
 
         random_features_np = seed_points_np[i_outer]
         print("seed point", random_features_np)
+
+        maxiter = 3 if fast else 30
 
         res = minimize(
             cp_value_and_jacobian,
@@ -234,7 +275,7 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
             method='L-BFGS-B',
             jac=True,
             bounds=bounds,
-            options=dict(maxiter=30),
+            options=dict(maxiter=maxiter),
             callback=print_progress,
             )
 
@@ -242,12 +283,16 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
         results.append(res)
 
         print(">>> random:")
-        proposal_analytics(input_features_size, random_features_np, constraints, total_latency_eval_fn)
+        seed_lat_dict = proposal_analytics(input_features_size, random_features_np,
+            constraints, total_latency_eval_fn)
         print("=== optimized:")
-        lat_dict = proposal_analytics(input_features_size, res.x, constraints, total_latency_eval_fn)
+        lat_dict = proposal_analytics(input_features_size, res.x,
+            constraints, total_latency_eval_fn)
         print("<<<")
         lat_dicts.append(lat_dict)
+        seed_lat_dicts.append(seed_lat_dict)
 
+        visualize_results(lat_dicts, seed_lat_dicts, test_lat_dicts, constraints)
 
     print(results)
     for res in results:
@@ -255,13 +300,6 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
         print_progress(res.x)
     print("---------------------------------------")
 
-    import matplotlib.pyplot as plt
-    plt.figure()
-    pred_lats = [v['predicted_lat'] for v in lat_dicts]
-    measured_lats = [v['measured_lat'] for v in lat_dicts]
-    plt.scatter(pred_lats, measured_lats)
-    plt.xlabel('pred_lats')
-    plt.ylabel('measured_lats')
-    plt.savefig('pred_vs_measured.png')
+    # visualize_results(lat_dicts, seed_lat_dicts, test_lat_dicts, constraints)
 
     print("Automl done")    
