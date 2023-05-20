@@ -355,7 +355,7 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
         random_features_np = seed_points_np[i_outer]
         res = results[i_outer]
 
-        print(">>> random:")
+        print(">>> seed:")
         seed_lat_dict = proposal_analytics(input_features_size,
                                            random_features_np,
                                            constraints,
@@ -372,7 +372,8 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
         visualize_results(lat_dicts,
                           seed_lat_dicts,
                           test_lat_dicts,
-                          constraints)
+                          constraints,
+                          'linear')
 
     print(results)
     for res in results:

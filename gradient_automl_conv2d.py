@@ -1,3 +1,5 @@
+import os
+import pickle
 import time
 import math
 from typing import Dict, Any, Iterable, Tuple, List, Union
@@ -16,6 +18,7 @@ from scipy.stats.qmc import LatinHypercube
 
 from losses import double_boundary_loss
 from constraints import Constraints, MinMax
+from visualization import visualize_results
 from dataclass_jax import register_pytree_node_dataclass
 
 
@@ -84,13 +87,13 @@ def total_weights(input_shape_nhwc: Tuple[int, ...], variables: Variables) \
 
 
 class DCN(nn.Module):
-    hidden_feat: Iterable[int]
-    hidden_strides: Iterable[int]
+    hidden_feat: Union[Iterable[int], np.ndarray]
+    hidden_strides: Union[Iterable[int], np.ndarray]
 
     @nn.compact
     def __call__(self, x):
         for out_f, strides in zip(self.hidden_feat, self.hidden_strides):
-            conv = nn.Conv(out_f,
+            conv = nn.Conv(out_f.item(),
                            kernel_size=KERNEL_SIZE_RS,
                            strides=strides.item())
             x = conv(x)
@@ -174,7 +177,7 @@ def proposal_analytics(input_shape_nhwc: Tuple[int, ...],
 
 def create_constraints() -> Constraints:
     min_layers = 5
-    max_layers = 10
+    max_layers = 20
     max_latency_sec = 0.01
     min_latency_sec = 0.75 * max_latency_sec
     max_parameters = 10_000_000
@@ -348,6 +351,10 @@ def optimize(seed_points: np.ndarray,
     return res
 
 
+def print_results(current_vector: np.ndarray):
+    print(f"Features & strides {[int(v) for v in current_vector.tolist()]}")
+
+
 def gradient_automl_conv2d(evaluator):
     constraints = create_constraints()
 
@@ -357,7 +364,7 @@ def gradient_automl_conv2d(evaluator):
     predict_flax = LatencyNet()  # DEBUG
 
     input_shape_nhwc = (1, 160, 160, 4)
-    init_features = 200
+    init_features = 300
     init_strides = 1
     test_features_array = jnp.zeros((constraints.layers.max,),
                                     dtype=jnp.float32) + init_features
@@ -399,7 +406,7 @@ def gradient_automl_conv2d(evaluator):
 
     fast = True
 
-    num_outer_iters = 4 if fast else 20
+    num_outer_iters = 5 if fast else 5
 
     latin_hypercube_feat = LatinHypercube(int(constraints.layers.max))
     seed_features_np = latin_hypercube_feat.random(num_outer_iters) * \
@@ -418,18 +425,25 @@ def gradient_automl_conv2d(evaluator):
                                cp_value_and_jacobian_args,
                                bounds)
 
-    multiprocess = False
-    if multiprocess:
-        pool_size = 10
-        with get_context('spawn').Pool(pool_size) as pool:
-            results = pool.map(optimize_partial, range(num_outer_iters))
+    results_cache_path = "results_cache_conv2d.pickle"
+    if os.path.exists(results_cache_path):
+        with open(results_cache_path, "rb") as f:
+            results = pickle.load(f)
     else:
-        results = []
-        for i_outer in range(num_outer_iters):
-            res = optimize_partial(i_outer)
-            print("-"*30)
-            print(res)
-            results.append(res)
+        multiprocess = True
+        if multiprocess:
+            pool_size = 10
+            with get_context('spawn').Pool(pool_size) as pool:
+                results = pool.map(optimize_partial, range(num_outer_iters))
+        else:
+            results = []
+            for i_outer in range(num_outer_iters):
+                res = optimize_partial(i_outer)
+                print("-"*30)
+                print(res)
+                results.append(res)
+        with open(results_cache_path, "wb") as f:
+            pickle.dump(results, f)
 
     print("Optimization done")
 
@@ -437,6 +451,39 @@ def gradient_automl_conv2d(evaluator):
     elapsed_opt_time = end_opt_time - start_opt_time
     print(f"elapsed_opt_time={elapsed_opt_time/60:.1f} min")
 
-    # benchmark_solution(input_shape_nhwc, variables)
+    lat_dicts = []
+    seed_lat_dicts = []
+    for i_outer in range(num_outer_iters):
+        flat_seed_vars_np = seed_flat_variables_np[i_outer]
+        seed_variables = Variables.from_flat(flat_seed_vars_np)
+        res = results[i_outer]
+
+        print(">>> seed:")
+        seed_lat_dict = proposal_analytics(input_shape_nhwc,
+                                           seed_variables,
+                                           constraints,
+                                           total_latency_eval_fn)
+        print("=== optimized:")
+        optimized_variables = Variables.from_flat(res.x)
+        lat_dict = proposal_analytics(input_shape_nhwc,
+                                      optimized_variables,
+                                      constraints,
+                                      total_latency_eval_fn)
+        print("<<<")
+        lat_dicts.append(lat_dict)
+        seed_lat_dicts.append(seed_lat_dict)
+
+        visualize_results(lat_dicts,
+                          seed_lat_dicts,
+                          [seed_lat_dict],
+                          constraints,
+                          'conv2d')
+
+    print(results)
+
+    for res in results:
+        print("---------------------------------------")
+        print_results(res.x)
+    print("---------------------------------------")
 
     print("Automl done")

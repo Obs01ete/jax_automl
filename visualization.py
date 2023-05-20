@@ -12,7 +12,8 @@ def transpose_list_dict(ld: List[Dict]) -> Optional[Dict[str, List]]:
 def visualize_results(lat_dicts: List[Dict],
                       seed_lat_dicts: List[Dict],
                       test_lat_dicts: List[Dict],
-                      constraints: Constraints):
+                      constraints: Constraints,
+                      label: str):
 
     opt_dict = transpose_list_dict(lat_dicts)
     seed_dict = transpose_list_dict(seed_lat_dicts)
@@ -22,7 +23,7 @@ def visualize_results(lat_dicts: List[Dict],
     plt.scatter(opt_dict['predicted_lat'], opt_dict['measured_lat'])
     plt.xlabel('pred_lats')
     plt.ylabel('measured_lats')
-    plt.savefig('pred_vs_measured.png')
+    plt.savefig(f'pred_vs_measured_{label}.png')
 
     plt.figure()
     x0 = constraints.parameters.min
@@ -41,4 +42,4 @@ def visualize_results(lat_dicts: List[Dict],
     plt.xlabel('num_parameters')
     plt.ylabel('predicted_lats')
     plt.legend()
-    plt.savefig('target_region.png')
+    plt.savefig(f'target_region_{label}.png')
