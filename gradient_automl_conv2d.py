@@ -4,6 +4,7 @@ from typing import Dict, Any, Iterable, Tuple
 import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -32,13 +33,18 @@ class DCN(nn.Module):
             x = nn.relu(x)
         return x
 
+@dataclass
+class Variables:
+    features: jax.Array
+    strides: jax.Array
 
-def benchmark_solution(input_shape_nhwc: Tuple[int], features_array, strides_array):
+
+def benchmark_solution(input_shape_nhwc: Tuple[int], variables: Variables):
     step = 4
-    int_features = (np.ceil(np.array(features_array) / step) * step).astype(np.int32)
+    int_features = (np.ceil(np.array(variables.features) / step) * step).astype(np.int32)
     int_features[int_features < step] = step
     
-    int_strides = np.round(np.array(strides_array))
+    int_strides = np.round(np.array(variables.strides))
     int_strides = np.clip(int_strides, 1, 2).astype(np.int32)
 
     assert int_features.shape == int_strides.shape
@@ -69,8 +75,9 @@ def gradient_automl_conv2d(evaluator):
     init_strides = 1
     features_array = jnp.zeros((max_layers,), dtype=jnp.float32) + init_features
     strides_array = jnp.zeros((max_layers,), dtype=jnp.float32) + init_strides # stride can be 1 or 2
+    variables = dict(features=features_array, strides=strides_array)
 
-    benchmark_solution(input_shape_nhwc, features_array, strides_array)
+    benchmark_solution(input_shape_nhwc, variables)
 
     #     "Tensor3DSpecs_c",
     #     "Tensor3DSpecs_h",
@@ -82,16 +89,16 @@ def gradient_automl_conv2d(evaluator):
     #     "ConvSpecs_u",
     #     "ConvSpecs_v"
 
-    def predict_latencies(predict_fn, params, features_arr, strides_arr):
+    def predict_latencies(predict_fn, params, variables: Variables):
         feature_tuples = []
         reso_hw = input_shape_nhwc[1:3]
         batch = input_shape_nhwc[0]
         ch_in = input_shape_nhwc[3]
 
         for i_layer in range(max_layers):
-            feat_in = ch_in if i_layer == 0 else features_arr[i_layer - 1]
-            feat_out = features_arr[i_layer]
-            stride = strides_arr[i_layer]
+            feat_in = ch_in if i_layer == 0 else variables.features[i_layer - 1]
+            feat_out = variables.features[i_layer]
+            stride = variables.strides[i_layer]
 
             features_tuple = (feat_in, reso_hw[0], batch, reso_hw[1],
                               feat_out, 3, 3, stride, stride)
@@ -106,13 +113,13 @@ def gradient_automl_conv2d(evaluator):
         raw_latencies = predict_fn.apply({'params': params}, features_jnp)
         return raw_latencies
     
-    def rem_loss_fn(features_arr, strides_arr):
+    def rem_loss_fn(variables: Variables):
         ch_in = input_shape_nhwc[3]
 
         weight_nums = []
         for i_layer in range(max_layers):
-            feat_in = ch_in if i_layer == 0 else features_arr[i_layer - 1]
-            feat_out = features_arr[i_layer]
+            feat_in = ch_in if i_layer == 0 else variables.features[i_layer - 1]
+            feat_out = variables.features[i_layer]
 
             num_weights = calc_weights_leaky(feat_in, feat_out, 3, 3)
             weight_nums.append(num_weights)
@@ -133,8 +140,8 @@ def gradient_automl_conv2d(evaluator):
 
         return total_loss, aux
     
-    def latency_loss_fn(predict_fn, params, features_arr, strides_arr):
-        raw_latencies = predict_latencies(predict_fn, params, features_arr, strides_arr)
+    def latency_loss_fn(predict_fn, params, variables):
+        raw_latencies = predict_latencies(predict_fn, params, variables)
         latencies = jnp.maximum(raw_latencies, 0)
         total_latency = jnp.sum(latencies)
         latency_loss = double_boundary_loss(total_latency, min_latency_sec, max_latency_sec)
@@ -145,34 +152,34 @@ def gradient_automl_conv2d(evaluator):
     params = evaluator['params']
     predict_flax = evaluator['predict_flax']
 
-    lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, features_array, strides_array)
+    lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, variables)
     latency_loss_jit_fn = nn.jit(latency_loss_fn)
-    lat_loss, lat_aux_dict = latency_loss_jit_fn(predict_flax, params, features_array, strides_array)
+    lat_loss, lat_aux_dict = latency_loss_jit_fn(predict_flax, params, variables)
     lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_jit_fn, argnums=(2, 3), has_aux=True))
-    llg, lat_aux_dict = lat_grad_fn(predict_flax, params, features_array, strides_array)
+    llg, lat_aux_dict = lat_grad_fn(predict_flax, params, variables)
 
-    raw_latencies = predict_latencies(predict_flax, params, features_array, strides_array)
+    raw_latencies = predict_latencies(predict_flax, params, variables)
 
-    tlv = rem_loss_fn(features_array, strides_array)
+    tlv = rem_loss_fn(variables)
     
     rem_loss_jit_fn = jax.jit(rem_loss_fn)
-    tljv = rem_loss_jit_fn(features_array, strides_array)
+    tljv = rem_loss_jit_fn(variables)
 
     rem_grad_fn = jax.value_and_grad(rem_loss_jit_fn, argnums=(0,), has_aux=True)
-    gfnv = rem_grad_fn(features_array, strides_array)
+    gfnv = rem_grad_fn(variables)
 
     rem_grad_fn_jit = jax.jit(rem_grad_fn)
-    gfnjv = rem_grad_fn_jit(features_array, strides_array)
+    gfnjv = rem_grad_fn_jit(variables)
 
     print("Optimizing parameters")
 
     for i_step in tqdm(range(100)):
         st = time.time()
-        (lat_loss, lat_aux_dict), (feat_grad, strd_grad) = lat_grad_fn(predict_flax, params, features_array, strides_array)
+        (lat_loss, lat_aux_dict), (feat_grad, strd_grad) = lat_grad_fn(predict_flax, params, variables)
         lat_loss.block_until_ready()
         print(time.time() - st)
         st = time.time()
-        (rem_loss, rem_aux_dict), (rem_feat_grad,) = rem_grad_fn_jit(features_array, strides_array)
+        (rem_loss, rem_aux_dict), (rem_feat_grad,) = rem_grad_fn_jit(variables)
         rem_loss.block_until_ready()
         print(time.time() - st)
         total_feat_grad = feat_grad + rem_feat_grad
@@ -193,10 +200,10 @@ def gradient_automl_conv2d(evaluator):
         strides_array += strd_grad_scaled_mimimize
         print(f"features_array={features_array.astype(np.int32)}")
         print(f"strides_array={strides_array}")
-        benchmark_solution(input_shape_nhwc, features_array, strides_array)
+        benchmark_solution(input_shape_nhwc, variables)
 
-    print(features_array, strides_array)
+    print(variables)
 
-    benchmark_solution(input_shape_nhwc, features_array, strides_array)
+    benchmark_solution(input_shape_nhwc, variables)
 
     print("Automl done")   

@@ -19,7 +19,8 @@ from gradient_automl_conv2d import gradient_automl_conv2d
 
 def main():
 
-    op_type = 'linear' # 'conv2d'
+    op_type = 'linear'
+    # op_type = 'conv2d'
     num_samples = 20000 # 20000 # 1000
 
     dataset = load_or_create_dataset(op_type, num_samples)
@@ -31,10 +32,12 @@ def main():
     trainer.load_or_train()
     # trainer.evaluate()
 
+    evaluator = trainer.get_evaluator()
+
     if op_type == 'linear':
-        gradient_automl_linear(trainer.get_evaluator())
+        gradient_automl_linear(evaluator)
     else:
-        gradient_automl_conv2d(trainer.get_evaluator())
+        gradient_automl_conv2d(evaluator)
 
     print("Done")
 

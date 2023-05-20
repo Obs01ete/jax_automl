@@ -1,3 +1,5 @@
-*.json
+/*.json
+.ipynb_checkpoints/
 checkpoint_*
 __pycache__
+/*.png
