@@ -11,7 +11,7 @@ from gradient_automl_linear import (
     rem_grad_fn, rem_grad_jit_fn, cp_value_and_jacobian)
 
 
-class TestOps(unittest.TestCase):
+class TestOpsLinear(unittest.TestCase):
 
     def test_ops(self):
         op_type = 'linear'
@@ -31,7 +31,7 @@ class TestOps(unittest.TestCase):
         test_features_array = jnp.zeros((constraints.layers.max,),
                                         dtype=jnp.float32) + 512
         test_features_array = test_features_array.at[5].set(-1000)
-        
+
         lat_args = (predict_flax, params,
                     input_features_size,
                     test_features_array,

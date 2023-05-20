@@ -3,6 +3,7 @@ import time
 import json
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 
 import jax
 
@@ -13,10 +14,13 @@ from gradient_automl_conv2d import gradient_automl_conv2d
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--op-type', default='conv2d', type=str)
+    parser.add_argument('--num-samples', default=20000, type=int)
+    args = parser.parse_args()
 
-    op_type = 'linear'
-    # op_type = 'conv2d'
-    num_samples = 20000  # 20000 # 1000
+    op_type = args.op_type
+    num_samples = args.num_samples
 
     dataset = load_or_create_dataset(op_type, num_samples)
 

@@ -1,16 +1,55 @@
-
 import time
-from typing import Iterable, Tuple
+import math
+from typing import Dict, Any, Iterable, Tuple, List, Union
 import numpy as np
-from tqdm import tqdm
 from collections import OrderedDict
+from functools import partial
 from dataclasses import dataclass
+from multiprocessing import get_context
 
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from scipy.optimize import minimize
+from scipy.stats.qmc import LatinHypercube
+
 from losses import double_boundary_loss
+from constraints import Constraints, MinMax
+from dataclass_jax import register_pytree_node_dataclass
+
+
+KERNEL_SIZE_RS = (3, 3)
+
+
+@register_pytree_node_dataclass
+@dataclass(frozen=True)
+class Variables:
+    features: Union[jax.Array, np.ndarray]
+    strides: Union[jax.Array, np.ndarray]
+
+    def flat_numpy(self):
+        if isinstance(self.features, jax.Array):
+            features = np.array(self.features)
+        else:
+            features = self.features
+        if isinstance(self.strides, jax.Array):
+            strides = np.array(self.strides)
+        else:
+            strides = self.strides
+        concat = np.concatenate((features, strides), axis=0)
+        assert len(concat.shape) == 1
+        return concat
+
+    @classmethod
+    def from_flat(cls, flat_vars: np.ndarray) -> 'Variables':
+        features = flat_vars[:len(flat_vars)//2]
+        strides = flat_vars[len(flat_vars)//2:]
+        return cls(features, strides)
+
+    def __add__(self, other: 'Variables'):
+        return self.__class__(self.features + other.features,
+                              self.strides + other.strides)
 
 
 def calc_weights_leaky(fin, fout, kernel_h, kernel_w):
@@ -22,6 +61,28 @@ def calc_weights_leaky(fin, fout, kernel_h, kernel_w):
     return result
 
 
+def calc_weights_precise(fin, fout, kernel_h, kernel_w):
+    result = nn.relu(fin + 1) * \
+        nn.relu(fout) * \
+        nn.relu(kernel_h) * \
+        nn.relu(kernel_w)
+    return result
+
+
+def total_weights(input_shape_nhwc: Tuple[int, ...], variables: Variables) \
+        -> int:
+
+    weight_nums = []
+    for i_layer in range(len(variables.features)):
+        feat_in = input_shape_nhwc[3] if i_layer == 0 \
+            else variables.features[i_layer - 1]
+        feat_out = variables.features[i_layer]
+
+        num_weights = calc_weights_precise(feat_in, feat_out, *KERNEL_SIZE_RS)
+        weight_nums.append(num_weights)
+    return np.sum(np.array(weight_nums)).item()
+
+
 class DCN(nn.Module):
     hidden_feat: Iterable[int]
     hidden_strides: Iterable[int]
@@ -29,61 +90,291 @@ class DCN(nn.Module):
     @nn.compact
     def __call__(self, x):
         for out_f, strides in zip(self.hidden_feat, self.hidden_strides):
-            conv = nn.Conv(out_f, kernel_size=(3, 3), strides=strides.item())
+            conv = nn.Conv(out_f,
+                           kernel_size=KERNEL_SIZE_RS,
+                           strides=strides.item())
             x = conv(x)
             x = nn.relu(x)
         return x
 
-@dataclass
-class Variables:
-    features: jax.Array
-    strides: jax.Array
+
+def discretize_features(variables: Variables):
+    ch_step = 4
+    min_stride = 1
+    max_stride = 2
+    features_np = np.array(variables.features)
+    strides_np = np.array(variables.strides)
+    res_features = []
+    res_strides = []
+    for feature, stride in zip(features_np, strides_np):
+        feature_int = int(feature)
+        stride_int = int(round(stride))
+        stride_int = min_stride if stride_int < min_stride \
+            else max_stride if stride_int > max_stride else stride_int
+        if feature_int <= 0:
+            break
+        feature_disc = int(math.ceil(feature_int / ch_step) * ch_step)
+        if feature_disc <= 0:
+            print("ERROR: feature_disc <= 0")
+        res_features.append(feature_disc)
+        res_strides.append(stride_int)
+    return Variables(
+        np.array(res_features, dtype=np.int32),
+        np.array(res_strides, dtype=np.int32))
 
 
-def benchmark_solution(input_shape_nhwc: Tuple[int], variables: Variables):
-    step = 4
-    int_features = (np.ceil(np.array(variables.features) / step) * step) \
-        .astype(np.int32)
-    int_features[int_features < step] = step
+def benchmark_variables(input_shape_nhwc: Tuple[int, ...],
+                        variables: Variables,
+                        num_reps=5):
 
-    int_strides = np.round(np.array(variables.strides))
-    int_strides = np.clip(int_strides, 1, 2).astype(np.int32)
+    disc_variables = discretize_features(variables)
 
-    assert int_features.shape == int_strides.shape
-
-    joint_net = DCN(int_features, int_strides)
+    joint_net = DCN(disc_variables.features, disc_variables.strides)
     example = jnp.ones(input_shape_nhwc)
     joint_net_vars = joint_net.init(jax.random.PRNGKey(44), example)
 
     flax_apply_jitted = jax.jit(lambda params, inputs:
-                                joint_net.apply(params, inputs))
+                                joint_net.apply(params, inputs),
+                                backend='gpu')
     _ = flax_apply_jitted(joint_net_vars, example)
 
-    for _ in range(10):
+    times = []
+    for _ in range(num_reps):
         st = time.time()
         _ = flax_apply_jitted(joint_net_vars, example).block_until_ready()
-        print(time.time() - st)
+        run_time = time.time() - st
+        times.append(run_time)
+
+    median_runtime = np.median(np.array(times))
+    return median_runtime
 
 
-def gradient_automl_conv2d(evaluator):
+def proposal_analytics(input_shape_nhwc: Tuple[int, ...],
+                       variables: Variables,
+                       constraints: Constraints,
+                       latency_fn):
+    disc_variables = discretize_features(variables)
+
+    predicted_lat = latency_fn(disc_variables).item()
+
+    measured_lat = benchmark_variables(input_shape_nhwc, disc_variables)
+
+    num_weights = total_weights(input_shape_nhwc, disc_variables)
+
+    print(f"Discretized features: {disc_variables.features.tolist()} "
+          f"{disc_variables.strides.tolist()}")
+    print(f"predicted {predicted_lat:.6f} measured {measured_lat:.6f} sec, "
+          f" {constraints.latency_sec}")
+    print(f"num_weights {num_weights}, {constraints.parameters}")
+
+    return dict(predicted_lat=predicted_lat,
+                measured_lat=measured_lat,
+                num_weights=num_weights)
+
+
+def create_constraints() -> Constraints:
     min_layers = 5
     max_layers = 10
-    max_latency_sec = 0.005
+    max_latency_sec = 0.01
     min_latency_sec = 0.75 * max_latency_sec
     max_parameters = 10_000_000
     min_parameters = 0.5 * max_parameters
-    
-    input_shape_nhwc = (1, 160, 160, 4)
-    init_features = 300
-    init_strides = 1
-    features_array = jnp.zeros((max_layers,),
-                               dtype=jnp.float32) + init_features
-    # stride can be 1 or 2
-    strides_array = jnp.zeros((max_layers,),
-                              dtype=jnp.float32) + init_strides
-    variables = dict(features=features_array, strides=strides_array)
 
-    benchmark_solution(input_shape_nhwc, variables)
+    constraints = Constraints(
+        MinMax(min_layers, max_layers),
+        MinMax(min_latency_sec, max_latency_sec),
+        MinMax(min_parameters, max_parameters))
+    return constraints
+
+
+def predict_latencies(predict_fn,
+                      params,
+                      input_shape_nhwc: Tuple[int, ...],
+                      variables: Variables):
+    batch = input_shape_nhwc[0]
+    reso_hw = input_shape_nhwc[1:3]
+    ch_in = input_shape_nhwc[3]
+
+    feature_tuples = []
+    for i_layer in range(len(variables.features)):
+        feat_in = ch_in if i_layer == 0 \
+            else variables.features[i_layer - 1]
+        feat_out = variables.features[i_layer]
+        stride = variables.strides[i_layer]
+
+        features_tuple = (feat_in, reso_hw[0], batch, reso_hw[1],
+                          feat_out, *KERNEL_SIZE_RS, stride, stride)
+        feature_tuples.append(features_tuple)
+
+        # if stride.item() > 1.5:
+        #     reso_hw = reso_hw / 2
+
+        reso_hw = jax.lax.cond(stride > 1.5,
+                               lambda x: tuple([v//2 for v in x]),
+                               lambda x: x, reso_hw)
+
+    features_jnp = jnp.array(feature_tuples)
+    raw_latencies = predict_fn.apply({'params': params}, features_jnp)
+    return raw_latencies
+
+
+def total_latency_fn(predict_fn,
+                     params,
+                     input_shape_nhwc: Tuple[int, ...],
+                     variables: Variables):
+    raw_latencies = predict_latencies(predict_fn,
+                                      params,
+                                      input_shape_nhwc,
+                                      variables)
+    latencies = jnp.maximum(raw_latencies, 0)
+    total_latency = jnp.sum(latencies)
+    return total_latency
+
+
+def latency_loss_fn(predict_fn,
+                    params,
+                    input_shape_nhwc: Tuple[int, ...],
+                    variables: Variables,
+                    constraints: Constraints):
+
+    raw_latencies = predict_latencies(predict_fn,
+                                      params,
+                                      input_shape_nhwc,
+                                      variables)
+    latencies = jnp.maximum(raw_latencies, 0)
+    total_latency = jnp.sum(latencies)
+    latency_loss = double_boundary_loss(total_latency,
+                                        constraints.latency_sec.min,
+                                        constraints.latency_sec.max)
+    aux = OrderedDict(total_latency=total_latency,
+                      latency_loss=latency_loss,
+                      raw_latencies=raw_latencies)
+    return latency_loss, aux
+
+
+def rem_loss_fn(input_shape_nhwc: Tuple[int, ...],
+                variables: Variables,
+                constraints: Constraints):
+    ch_in = input_shape_nhwc[3]
+
+    weight_nums = []
+    for i_layer in range(int(constraints.layers.max)):
+        feat_in = ch_in if i_layer == 0 \
+                else variables.features[i_layer - 1]
+        feat_out = variables.features[i_layer]
+
+        num_weights = calc_weights_leaky(feat_in, feat_out, *KERNEL_SIZE_RS)
+        weight_nums.append(num_weights)
+
+    total_num_weights = jnp.sum(jnp.array(weight_nums))
+    num_weights_loss = double_boundary_loss(total_num_weights,
+                                            constraints.parameters.min,
+                                            constraints.parameters.max)
+
+    # compactness_array = jnp.maximum(features_arr[1:] - features_arr[:-1], 0)
+    # compactness_loss = jnp.sum(compactness_array) / jnp.mean(jnp.square(features_arr))
+    compactness_loss = 0.0
+
+    total_loss = 0.1 * num_weights_loss + 100.0 * compactness_loss
+    # total_loss = 100.0 * compactness_loss
+
+    aux = OrderedDict(
+        total_num_weights=total_num_weights,
+        num_weights_loss=num_weights_loss,
+        compactness_loss=compactness_loss)
+
+    return total_loss, aux
+
+
+latency_loss_jit_fn = nn.jit(latency_loss_fn,
+                             static_argnums=(2, 4),
+                             backend='gpu')
+lat_grad_fn = jax.value_and_grad(latency_loss_fn,
+                                 argnums=(3,),
+                                 has_aux=True)
+lat_grad_jit_fn = nn.jit(lat_grad_fn, static_argnums=(2, 4), backend='gpu')
+
+rem_loss_jit_fn = jax.jit(rem_loss_fn, static_argnums=(0, 2))
+rem_grad_fn = jax.value_and_grad(rem_loss_fn, argnums=(1,), has_aux=True)
+rem_grad_jit_fn = jax.jit(rem_grad_fn, static_argnums=(0, 2), backend='gpu')
+
+
+def cp_value_and_jacobian(flat_variables: np.ndarray,
+                          predict_flax,
+                          params,
+                          input_shape_nhwc: Tuple[int, ...],
+                          constraints: Constraints) \
+        -> Tuple[float, List[float]]:
+
+    variables = Variables.from_flat(flat_variables)
+
+    (lv, *_), (lg,) = lat_grad_jit_fn(predict_flax,
+                                      params,
+                                      input_shape_nhwc,
+                                      variables,
+                                      constraints)
+    (rv, *_), (rg,) = rem_grad_jit_fn(input_shape_nhwc,
+                                      variables,
+                                      constraints)
+    total_val = lv + rv
+    total_val_np = np.array(total_val)
+    total_grad: Variables = lg + rg
+    total_grad_flat_np = total_grad.flat_numpy()
+    return total_val_np.item(), total_grad_flat_np.tolist()
+
+
+def optimize(seed_points: np.ndarray,
+             fast,
+             cp_value_and_jacobian_args,
+             bounds,
+             i_outer):
+
+    print(f"Run iteration {i_outer}")
+
+    flat_seed_vars_np = seed_points[i_outer]
+
+    maxiter = 8 if fast else 30
+
+    res = minimize(
+        cp_value_and_jacobian,
+        flat_seed_vars_np,
+        args=cp_value_and_jacobian_args,
+        method='L-BFGS-B',
+        jac=True,
+        bounds=bounds,
+        options=dict(maxiter=maxiter),
+        callback=None,
+        )
+    return res
+
+
+def gradient_automl_conv2d(evaluator):
+    constraints = create_constraints()
+
+    params = evaluator['params']
+    # predict_flax = evaluator['predict_flax'] # TEMPORARY
+    from latency_model import LatencyNet
+    predict_flax = LatencyNet()  # DEBUG
+
+    input_shape_nhwc = (1, 160, 160, 4)
+    init_features = 200
+    init_strides = 1
+    test_features_array = jnp.zeros((constraints.layers.max,),
+                                    dtype=jnp.float32) + init_features
+    # stride can be 1 or 2
+    test_strides_array = jnp.zeros((constraints.layers.max,),
+                                   dtype=jnp.float32) + init_strides
+    test_variables = Variables(test_features_array, test_strides_array)
+
+    total_latency_eval_fn = partial(total_latency_fn,
+                                    predict_flax,
+                                    params,
+                                    input_shape_nhwc)
+
+    seed_lat_dict = proposal_analytics(input_shape_nhwc,
+                                       test_variables,
+                                       constraints,
+                                       total_latency_eval_fn)
 
     #     "Tensor3DSpecs_c",
     #     "Tensor3DSpecs_h",
@@ -95,137 +386,57 @@ def gradient_automl_conv2d(evaluator):
     #     "ConvSpecs_u",
     #     "ConvSpecs_v"
 
-    def predict_latencies(predict_fn, params, variables: Variables):
-        feature_tuples = []
-        reso_hw = input_shape_nhwc[1:3]
-        batch = input_shape_nhwc[0]
-        ch_in = input_shape_nhwc[3]
-
-        for i_layer in range(max_layers):
-            feat_in = ch_in if i_layer == 0 \
-                else variables.features[i_layer - 1]
-            feat_out = variables.features[i_layer]
-            stride = variables.strides[i_layer]
-
-            features_tuple = (feat_in, reso_hw[0], batch, reso_hw[1],
-                              feat_out, 3, 3, stride, stride)
-            feature_tuples.append(features_tuple)
-
-            # if stride.item() > 1.5:
-            #     reso_hw = reso_hw / 2
-            
-            reso_hw = jax.lax.cond(stride > 1.5,
-                                   lambda x: tuple([v//2 for v in x]),
-                                   lambda x: x, reso_hw)
-
-        features_jnp = jnp.array(feature_tuples)
-        raw_latencies = predict_fn.apply({'params': params}, features_jnp)
-        return raw_latencies
-    
-    def rem_loss_fn(variables: Variables):
-        ch_in = input_shape_nhwc[3]
-
-        weight_nums = []
-        for i_layer in range(max_layers):
-            feat_in = ch_in if i_layer == 0 \
-                 else variables.features[i_layer - 1]
-            feat_out = variables.features[i_layer]
-
-            num_weights = calc_weights_leaky(feat_in, feat_out, 3, 3)
-            weight_nums.append(num_weights)
-
-        total_num_weights = jnp.sum(jnp.array(weight_nums))
-        num_weights_loss = double_boundary_loss(total_num_weights,
-                                                min_parameters,
-                                                max_parameters)
-
-        # compactness_array = jnp.maximum(features_arr[1:] - features_arr[:-1], 0)
-        # compactness_loss = jnp.sum(compactness_array) / jnp.mean(jnp.square(features_arr))
-        compactness_loss = 0.0
-
-        total_loss = 0.1 * num_weights_loss + 100.0 * compactness_loss
-        # total_loss = 100.0 * compactness_loss
-
-        aux = OrderedDict(
-            total_num_weights=total_num_weights,
-            num_weights_loss=num_weights_loss,
-            compactness_loss=compactness_loss)
-
-        return total_loss, aux
-
-    def latency_loss_fn(predict_fn, params, variables):
-        raw_latencies = predict_latencies(predict_fn, params, variables)
-        latencies = jnp.maximum(raw_latencies, 0)
-        total_latency = jnp.sum(latencies)
-        latency_loss = double_boundary_loss(total_latency,
-                                            min_latency_sec,
-                                            max_latency_sec)
-        aux = OrderedDict(total_latency=total_latency,
-                          latency_loss=latency_loss,
-                          raw_latencies=raw_latencies)
-        return latency_loss, aux
-
-    params = evaluator['params']
-    predict_flax = evaluator['predict_flax']
-
-    lat_loss, lat_aux_dict = latency_loss_fn(predict_flax, params, variables)
-    latency_loss_jit_fn = nn.jit(latency_loss_fn)
-    lat_loss, lat_aux_dict = latency_loss_jit_fn(
-        predict_flax, params, variables)
-    lat_grad_fn = nn.jit(jax.value_and_grad(latency_loss_jit_fn,
-                                            argnums=(2, 3),
-                                            has_aux=True))
-    llg, lat_aux_dict = lat_grad_fn(predict_flax, params, variables)
-
-    raw_latencies = predict_latencies(predict_flax, params, variables)
-
-    tlv = rem_loss_fn(variables)
-    
-    rem_loss_jit_fn = jax.jit(rem_loss_fn)
-    tljv = rem_loss_jit_fn(variables)
-
-    rem_grad_fn = jax.value_and_grad(rem_loss_jit_fn,
-                                     argnums=(0,),
-                                     has_aux=True)
-    gfnv = rem_grad_fn(variables)
-
-    rem_grad_fn_jit = jax.jit(rem_grad_fn)
-    gfnjv = rem_grad_fn_jit(variables)
-
     print("Optimizing parameters")
 
-    for i_step in tqdm(range(100)):
-        st = time.time()
-        (lat_loss, lat_aux_dict), (feat_grad, strd_grad) = lat_grad_fn(
-            predict_flax, params, variables)
-        lat_loss.block_until_ready()
-        print(time.time() - st)
-        st = time.time()
-        (rem_loss, rem_aux_dict), (rem_feat_grad,) = rem_grad_fn_jit(variables)
-        rem_loss.block_until_ready()
-        print(time.time() - st)
-        total_feat_grad = feat_grad + rem_feat_grad
-        feat_grad_scaled_mimimize = - 1e+4 * np.array(total_feat_grad)
-        strd_grad_scaled_mimimize = - 5e+1 * np.array(strd_grad)
-        print(f"--- step={i_step} lat_loss={lat_loss.item():.6f} rem_loss={rem_loss.item():.6f}")
-        lat_aux_dict = {k: v.item() if v.shape == () else v for k, v in lat_aux_dict.items()}
-        rem_aux_dict = {k: v.item() if v.shape == () else v for k, v in rem_aux_dict.items()}
-        print(f"lat_aux_dict={lat_aux_dict}")
-        print(f"rem_aux_dict={rem_aux_dict}")
-        print(f"feat_grad={feat_grad_scaled_mimimize}")
-        print(f"strd_grad={strd_grad_scaled_mimimize}")
-        if jnp.mean(jnp.abs(feat_grad_scaled_mimimize)).item() < 1e-6:
-            # print("Grads are zero. Early stopping.")
-            # break
-            pass
-        features_array += feat_grad_scaled_mimimize
-        strides_array += strd_grad_scaled_mimimize
-        print(f"features_array={features_array.astype(np.int32)}")
-        print(f"strides_array={strides_array}")
-        benchmark_solution(input_shape_nhwc, variables)
+    start_opt_time = time.time()
 
-    print(variables)
+    CH_MAX = 256
 
-    benchmark_solution(input_shape_nhwc, variables)
+    bounds_features = [(-CH_MAX, CH_MAX)
+                       for _ in range(int(constraints.layers.max))]
+    bounds_strides = [(1, 2) for _ in range(int(constraints.layers.max))]
+    bounds = bounds_features + bounds_strides
+
+    fast = True
+
+    num_outer_iters = 4 if fast else 20
+
+    latin_hypercube_feat = LatinHypercube(int(constraints.layers.max))
+    seed_features_np = latin_hypercube_feat.random(num_outer_iters) * \
+        (CH_MAX - 1) + 1
+    latin_hypercube_strd = LatinHypercube(int(constraints.layers.max))
+    seed_strides_np = latin_hypercube_strd.random(num_outer_iters) + 1
+    seed_flat_variables_np = np.concatenate((seed_features_np,
+                                            seed_strides_np), axis=-1)
+
+    cp_value_and_jacobian_args = (predict_flax, params,
+                                  input_shape_nhwc,
+                                  constraints)
+    optimize_partial = partial(optimize,
+                               seed_flat_variables_np,
+                               fast,
+                               cp_value_and_jacobian_args,
+                               bounds)
+
+    multiprocess = False
+    if multiprocess:
+        pool_size = 10
+        with get_context('spawn').Pool(pool_size) as pool:
+            results = pool.map(optimize_partial, range(num_outer_iters))
+    else:
+        results = []
+        for i_outer in range(num_outer_iters):
+            res = optimize_partial(i_outer)
+            print("-"*30)
+            print(res)
+            results.append(res)
+
+    print("Optimization done")
+
+    end_opt_time = time.time()
+    elapsed_opt_time = end_opt_time - start_opt_time
+    print(f"elapsed_opt_time={elapsed_opt_time/60:.1f} min")
+
+    # benchmark_solution(input_shape_nhwc, variables)
 
     print("Automl done")

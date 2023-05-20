@@ -11,6 +11,9 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 
+BENCHMARKING_BATCH = 1000
+
+
 class Linearizable(ABC):
     @abstractmethod
     def linearize(self) -> Tuple[int]:
@@ -90,7 +93,6 @@ class LinearOpSpecs:
 
     @classmethod
     def get_random(cls, np_rng: np.random._generator.Generator):
-        batch = 1000  # ATTENTION (!)
         max_features = 4096
         step = 16
         fifo = np_rng.exponential(scale=max_features//2, size=(2,))
@@ -99,7 +101,7 @@ class LinearOpSpecs:
         fifo[fifo <= 0] = 1
         fifo = (fifo * step).astype(np.int32)
         fi, fo = (int(v) for v in fifo)
-        ts = Tensor1DSpecs(batch, fi)
+        ts = Tensor1DSpecs(BENCHMARKING_BATCH, fi)
         cs = LinearSpecs(fo)
         os = cls(ts, cs)
         return os
