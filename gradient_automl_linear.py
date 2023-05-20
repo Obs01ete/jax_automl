@@ -1,37 +1,30 @@
 import time
-from typing import Dict, Any, Iterable, Union
+from typing import Dict, Any, Iterable, Tuple, List
 import numpy as np
-from tqdm import tqdm
 from collections import OrderedDict
-from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
 from scipy.optimize import minimize
-from scipy.optimize import shgo
+# from scipy.optimize import shgo
 from scipy.stats.qmc import LatinHypercube
 
+# from multiprocessing import Pool
+from multiprocessing import get_context
+# from multiprocessing.pool import ThreadPool as Pool
+
 from losses import double_boundary_loss
-
-
-@dataclass(frozen=True)
-class MinMax:
-    min: Union[int, float]
-    max: Union[int, float]
-
-
-@dataclass(frozen=True)
-class Constraints:
-    layers: MinMax
-    latency_sec: MinMax
-    parameters: MinMax
+from visualization import visualize_results
+from constraints import Constraints, MinMax
 
 
 def calc_weights_leaky(fin, fout):
     negative_slope = 1e-2
-    result = nn.leaky_relu(fin + 1, negative_slope) * nn.leaky_relu(fout, negative_slope)
+    result = nn.leaky_relu(fin + 1, negative_slope) * \
+        nn.leaky_relu(fout, negative_slope)
     return result
 
 
@@ -43,7 +36,8 @@ def calc_weights_precise(fin, fout):
 def total_weights(input_features_size: int, features_arr: np.ndarray) -> int:
     weight_nums = []
     for i_layer in range(len(features_arr)):
-        feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
+        feat_in = input_features_size if i_layer == 0 \
+            else features_arr[i_layer - 1]
         feat_out = features_arr[i_layer]
 
         num_weights = calc_weights_precise(feat_in, feat_out)
@@ -57,10 +51,8 @@ class MLP(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        in_f = self.in_feat
         for out_f in self.hidden_feat:
-            x = nn.relu(nn.Dense(in_f, out_f)(x))
-            in_f = out_f
+            x = nn.relu(nn.Dense(out_f)(x))  # bug fixed
         return x
 
 
@@ -86,7 +78,8 @@ def benchmark_features_array(input_features_size, int_features, num_reps=5):
     example = jnp.ones((1000, 10))
     joint_net_vars = joint_net.init(jax.random.PRNGKey(44), example)
 
-    flax_apply_jitted = jax.jit(lambda params, inputs: joint_net.apply(params, inputs))
+    flax_apply_jitted = jax.jit(lambda params,
+                                inputs: joint_net.apply(params, inputs))
     _ = flax_apply_jitted(joint_net_vars, example)
 
     times = []
@@ -95,12 +88,15 @@ def benchmark_features_array(input_features_size, int_features, num_reps=5):
         _ = flax_apply_jitted(joint_net_vars, example).block_until_ready()
         run_time = time.time() - st
         times.append(run_time)
-    
+
     median_runtime = np.median(np.array(times))
     return median_runtime
 
 
-def proposal_analytics(input_features_size, features_array, constraints: Constraints, latency_fn):
+def proposal_analytics(input_features_size,
+                       features_array,
+                       constraints: Constraints,
+                       latency_fn):
     int_features = discretize_features(features_array)
 
     predicted_lat = latency_fn(int_features).item()
@@ -110,44 +106,13 @@ def proposal_analytics(input_features_size, features_array, constraints: Constra
     num_weights = total_weights(input_features_size, int_features)
 
     print(f"Discretized features: {int_features.tolist()}")
-    print(f"predicted {predicted_lat:.6f} measured {measured_lat:.6f} sec, {constraints.latency_sec}")
+    print(f"predicted {predicted_lat:.6f} measured {measured_lat:.6f} sec, "
+          f" {constraints.latency_sec}")
     print(f"num_weights {num_weights}, {constraints.parameters}")
 
-    return dict(predicted_lat=predicted_lat, measured_lat=measured_lat, num_weights=num_weights)
-
-
-def visualize_results(lat_dicts, seed_lat_dicts, test_lat_dicts, constraints: Constraints):
-    def transpose_list_dict(ld):
-        return {k: [d[k] for d in ld] for k in ld[0].keys()} if len(ld) > 0 else None
-
-    opt_dict = transpose_list_dict(lat_dicts)
-    seed_dict = transpose_list_dict(seed_lat_dicts)
-    test_dict = transpose_list_dict(test_lat_dicts)
-
-    import matplotlib.pyplot as plt
-    plt.figure()
-    # pred_lats = [v['predicted_lat'] for v in lat_dicts]
-    # measured_lats = [v['measured_lat'] for v in lat_dicts]
-    # weights_qty = [v['num_weights'] for v in lat_dicts]
-    plt.scatter(opt_dict['predicted_lat'], opt_dict['measured_lat'])
-    plt.xlabel('pred_lats')
-    plt.ylabel('measured_lats')
-    plt.savefig('pred_vs_measured.png')
-
-    plt.figure()
-    x0 = constraints.parameters.min
-    x1 = constraints.parameters.max
-    y0 = constraints.latency_sec.min
-    y1 = constraints.latency_sec.max
-    plt.scatter(opt_dict['num_weights'], opt_dict['predicted_lat'], c='blue', label='optimized points')
-    plt.scatter(seed_dict['num_weights'], seed_dict['predicted_lat'], c='gray', label='seed points')
-    if test_dict is not None:
-        plt.scatter(test_dict['num_weights'], test_dict['predicted_lat'], c='red', label='known solution')
-    plt.plot([x0, x0, x1, x1, x0], [y0, y1, y1, y0, y0], 'g--', label='target region')
-    plt.xlabel('num_parameters')
-    plt.ylabel('predicted_lats')
-    plt.legend()
-    plt.savefig('target_region.png')
+    return dict(predicted_lat=predicted_lat,
+                measured_lat=measured_lat,
+                num_weights=num_weights)
 
 
 def create_constraints() -> Constraints:
@@ -168,7 +133,8 @@ def create_constraints() -> Constraints:
 def predict_latencies(predict_fn, params, input_features_size, features_arr):
     feature_tuples = []
     for i_layer in range(len(features_arr)):
-        feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
+        feat_in = input_features_size if i_layer == 0 \
+            else features_arr[i_layer - 1]
         feat_out = features_arr[i_layer]
 
         features_tuple = (feat_in, feat_out)
@@ -178,10 +144,12 @@ def predict_latencies(predict_fn, params, input_features_size, features_arr):
     raw_latencies = predict_fn.apply({'params': params}, features_jnp)
     return raw_latencies
 
+
 def rem_loss_fn(input_features_size, features_arr, constraints: Constraints):
     weight_nums = []
     for i_layer in range(len(features_arr)):
-        feat_in = input_features_size if i_layer == 0 else features_arr[i_layer - 1]
+        feat_in = input_features_size if i_layer == 0 \
+            else features_arr[i_layer - 1]
         feat_out = features_arr[i_layer]
 
         num_weights = calc_weights_leaky(feat_in, feat_out)
@@ -189,10 +157,12 @@ def rem_loss_fn(input_features_size, features_arr, constraints: Constraints):
 
     total_num_weights = jnp.sum(jnp.array(weight_nums))
     num_weights_loss = double_boundary_loss(total_num_weights,
-        constraints.parameters.min, constraints.parameters.max)
+                                            constraints.parameters.min,
+                                            constraints.parameters.max)
 
     compactness_array = jnp.maximum(features_arr[1:] - features_arr[:-1], 0)
-    compactness_loss = jnp.sum(compactness_array) / jnp.mean(jnp.square(features_arr))
+    compactness_loss = jnp.sum(compactness_array) / \
+        jnp.mean(jnp.square(features_arr))
 
     total_loss = 0.1 * num_weights_loss + 100.0 * compactness_loss
 
@@ -202,21 +172,39 @@ def rem_loss_fn(input_features_size, features_arr, constraints: Constraints):
 
     return total_loss, aux
 
+
 def total_latency_fn(predict_fn, params, input_features_size, features_arr):
-    raw_latencies = predict_latencies(predict_fn, params, input_features_size, features_arr)
+    raw_latencies = predict_latencies(predict_fn, params,
+                                      input_features_size,
+                                      features_arr)
     latencies = jnp.maximum(raw_latencies, 0)
     total_latency = jnp.sum(latencies)
     return total_latency
 
-def latency_loss_fn(predict_fn, params, input_features_size, features_arr, constraints: Constraints):
-    total_latency = total_latency_fn(predict_fn, params, input_features_size, features_arr)
+
+def latency_loss_fn(predict_fn,
+                    params,
+                    input_features_size,
+                    features_arr,
+                    constraints: Constraints):
+
+    total_latency = total_latency_fn(predict_fn,
+                                     params,
+                                     input_features_size,
+                                     features_arr)
     latency_loss = double_boundary_loss(total_latency,
-        constraints.latency_sec.min, constraints.latency_sec.min)
+                                        constraints.latency_sec.min,
+                                        constraints.latency_sec.min)
     aux = OrderedDict(total_latency=total_latency, latency_loss=latency_loss)
     return latency_loss, aux
 
-latency_loss_jit_fn = nn.jit(latency_loss_fn, static_argnums=(2, 4), backend='gpu')
-lat_grad_fn = jax.value_and_grad(latency_loss_jit_fn, argnums=(3,), has_aux=True)
+
+latency_loss_jit_fn = nn.jit(latency_loss_fn,
+                             static_argnums=(2, 4),
+                             backend='gpu')
+lat_grad_fn = jax.value_and_grad(latency_loss_jit_fn,
+                                 argnums=(3,),
+                                 has_aux=True)
 lat_grad_jit_fn = nn.jit(lat_grad_fn, static_argnums=(2, 4), backend='gpu')
 
 rem_loss_jit_fn = jax.jit(rem_loss_fn, static_argnums=(0, 2))
@@ -225,12 +213,17 @@ rem_grad_jit_fn = jax.jit(rem_grad_fn, static_argnums=(0, 2), backend='gpu')
 
 
 def cp_value_and_jacobian(feature_vector: np.ndarray, predict_flax,
-        params, input_features_size, constraints) -> np.ndarray:
+                          params,
+                          input_features_size,
+                          constraints) -> Tuple[float, List[float]]:
 
     (lv, *_), (lg,) = lat_grad_jit_fn(predict_flax, params,
-        input_features_size, feature_vector, constraints)
+                                      input_features_size,
+                                      feature_vector,
+                                      constraints)
     (rv, *_), (rg,) = rem_grad_jit_fn(input_features_size,
-        feature_vector, constraints)
+                                      feature_vector,
+                                      constraints)
     total_val = lv + rv
     total_val_np = np.array(total_val)
     total_grad = lg + rg
@@ -243,7 +236,12 @@ def print_progress(current_vector):
     return False
 
 
-def optimize(seed_points_np, fast, cp_value_and_jacobian_args, bounds, i_outer):
+def optimize(seed_points_np,
+             fast,
+             cp_value_and_jacobian_args,
+             bounds,
+             i_outer):
+
     random_features_np = seed_points_np[i_outer]
     # print("seed point", random_features_np)
     print(f"Run iteration {i_outer}")
@@ -258,9 +256,26 @@ def optimize(seed_points_np, fast, cp_value_and_jacobian_args, bounds, i_outer):
         jac=True,
         bounds=bounds,
         options=dict(maxiter=maxiter),
-        callback=None, # print_progress
+        callback=None,  # print_progress
         )
     return res
+
+
+def generate_known_solutions(input_features_size,
+                             constraints,
+                             total_latency_eval_fn):
+    test_lat_dicts = []
+    for i_pos in range(4, 8):
+        test_features_array = jnp.zeros((constraints.layers.max,),
+                                        dtype=jnp.float32) + 512
+        test_features_array = test_features_array.at[i_pos].set(-1000)
+
+        print("For", np.array(test_features_array))
+        test_lat_dicts.append(proposal_analytics(input_features_size,
+                                                 test_features_array,
+                                                 constraints,
+                                                 total_latency_eval_fn))
+    return test_lat_dicts
 
 
 def gradient_automl_linear(evaluator: Dict[str, Any]):
@@ -268,54 +283,49 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
 
     input_features_size = 10
 
-    predict_fn = evaluator['predict_fn']
-    module = evaluator['module']
+    # predict_fn = evaluator['predict_fn']
+    # module = evaluator['module']
     params = evaluator['params']
-
     # predict_flax = evaluator['predict_flax'] # TEMPORARY
     from latency_model import LatencyNet
-    predict_flax = LatencyNet() # DEBUG
+    predict_flax = LatencyNet()  # DEBUG
 
-    from functools import partial
-    total_latency_eval_fn = partial(total_latency_fn, predict_flax, params, input_features_size)
-    
+    total_latency_eval_fn = partial(total_latency_fn,
+                                    predict_flax,
+                                    params,
+                                    input_features_size)
+
     test_lat_dicts = []
     if True:
-        for i_pos in range(4, 8):
-            test_features_array = jnp.zeros((constraints.layers.max,), dtype=jnp.float32) + 512
-            test_features_array = test_features_array.at[i_pos].set(-1000)
+        test_lat_dicts = generate_known_solutions(input_features_size,
+                                                  constraints,
+                                                  total_latency_eval_fn)
 
-            print("For", np.array(test_features_array))
-            test_lat_dicts.append(proposal_analytics(input_features_size, test_features_array,
-                constraints, total_latency_eval_fn))
-
-    test_features_array = jnp.zeros((constraints.layers.max,), dtype=jnp.float32) + 512
-    test_features_array = test_features_array.at[5].set(-1000)
-
-    gpu = jax.devices("gpu")[0]
+    # gpu = jax.devices("gpu")[0]
 
     print("Optimizing parameters")
-    
+
     start_opt_time = time.time()
-    
+
     CH_MAX = 512
 
-    bounds = [(-CH_MAX, CH_MAX) for _ in range(constraints.layers.max)]
+    bounds = [(-CH_MAX, CH_MAX) for _ in range(int(constraints.layers.max))]
 
     fast = False
 
     num_outer_iters = 4 if fast else 20
 
-    latin_hypercube = LatinHypercube(constraints.layers.max)
+    latin_hypercube = LatinHypercube(int(constraints.layers.max))
     seed_points_np = latin_hypercube.random(num_outer_iters) * (CH_MAX - 1) + 1
 
-    # from multiprocessing import Pool
-    from multiprocessing import get_context
-    # from multiprocessing.pool import ThreadPool as Pool 
-
-    from functools import partial
-    cp_value_and_jacobian_args = (predict_flax, params, input_features_size, constraints)
-    optimize_partial = partial(optimize, seed_points_np, fast, cp_value_and_jacobian_args, bounds)
+    cp_value_and_jacobian_args = (predict_flax, params,
+                                  input_features_size,
+                                  constraints)
+    optimize_partial = partial(optimize,
+                               seed_points_np,
+                               fast,
+                               cp_value_and_jacobian_args,
+                               bounds)
 
     multiprocess = True
     if multiprocess:
@@ -325,7 +335,7 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
     else:
         results = []
         for i_outer in range(num_outer_iters):
-            res = optimize(i_outer)
+            res = optimize_partial(i_outer)
             results.append(res)
 
     print("Optimization done")
@@ -337,16 +347,23 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
         res = results[i_outer]
 
         print(">>> random:")
-        seed_lat_dict = proposal_analytics(input_features_size, random_features_np,
-            constraints, total_latency_eval_fn)
+        seed_lat_dict = proposal_analytics(input_features_size,
+                                           random_features_np,
+                                           constraints,
+                                           total_latency_eval_fn)
         print("=== optimized:")
-        lat_dict = proposal_analytics(input_features_size, res.x,
-            constraints, total_latency_eval_fn)
+        lat_dict = proposal_analytics(input_features_size,
+                                      res.x,
+                                      constraints,
+                                      total_latency_eval_fn)
         print("<<<")
         lat_dicts.append(lat_dict)
         seed_lat_dicts.append(seed_lat_dict)
 
-        visualize_results(lat_dicts, seed_lat_dicts, test_lat_dicts, constraints)
+        visualize_results(lat_dicts,
+                          seed_lat_dicts,
+                          test_lat_dicts,
+                          constraints)
 
     print(results)
     for res in results:
@@ -358,6 +375,6 @@ def gradient_automl_linear(evaluator: Dict[str, Any]):
 
     end_opt_time = time.time()
     elapsed_opt_time = end_opt_time - start_opt_time
-    print(f"elapsed_opt_time={elapsed_opt_time:.1f}")
+    print(f"elapsed_opt_time={elapsed_opt_time/60:.1f} min")
 
-    print("Automl done")    
+    print("Automl done")

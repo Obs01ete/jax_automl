@@ -33,7 +33,7 @@ class LatencyNet(nn.Module):
         linear7 = nn.Dense(features=ch)
         linear8 = nn.Dense(features=ch)
         linear9 = nn.Dense(features=1)
-        
+
         x = 1e-3 * x
         x = nn.relu(linear1(x))
         x = nn.relu(linear2(x))
@@ -66,7 +66,7 @@ def init_train_state(
     variables = model.init(random_key, jnp.ones(shape))
     optimizer = optax.adam(learning_rate)
     return train_state.TrainState.create(
-        apply_fn = model.apply,
+        apply_fn=model.apply,
         tx=optimizer,
         params=variables['params']
     )
@@ -119,6 +119,7 @@ def train_step(
     metrics = compute_metrics(pred=pred, label=label)
     return state, metrics, pred
 
+
 @jax.jit
 def evaluate(
     state: train_state.TrainState, batch: jnp.ndarray
@@ -150,7 +151,8 @@ class LatencyModelTrainer:
         self.batch_size = 128
         learning_rate = 1e-5
 
-        self.train_dataset = tf.data.Dataset.from_tensor_slices((self.features, self.targets))
+        self.train_dataset = tf.data.Dataset.from_tensor_slices(
+            (self.features, self.targets))
         # lin_feat = np.tile(np.expand_dims(np.linspace(0.01/1000, 0.01, 1000), 1), (1, 2))
         # lin_targets = np.linspace(0.01/1000, 0.01, 1000)
         # self.train_dataset = tf.data.Dataset.from_tensor_slices((lin_feat, lin_targets))
@@ -159,8 +161,9 @@ class LatencyModelTrainer:
 
         self.rng = jax.random.PRNGKey(43)
         self.state = init_train_state(
-           self.net, self.rng, (self.batch_size, self.features.shape[1]), learning_rate)
-        
+           self.net, self.rng, (self.batch_size, self.features.shape[1]),
+           learning_rate)
+
         # feature = jnp.ones((1, 2))
         # pred = predict(self.net, self.state.params, feature)
 
@@ -186,7 +189,8 @@ class LatencyModelTrainer:
             # flat_params = jax.tree_util.tree_leaves(self.state.params)
             # print([np.array(p).shape for p in flat_params])
 
-            train_dataset = self.train_dataset.shuffle(shuffle_buffer_size).batch(self.batch_size)
+            train_dataset = self.train_dataset.shuffle(shuffle_buffer_size) \
+                .batch(self.batch_size)
             # train_dataset = self.train_dataset.batch(self.batch_size)
 
             train_batch_metrics = []
@@ -215,16 +219,17 @@ class LatencyModelTrainer:
 
             if epoch % 100 == 0:
                 self.print_metrics(train_batch_metrics)
-        
+
         self.print_metrics(train_batch_metrics)
 
         self.save()
 
         print("Training done")
-    
+
     def evaluate(self):
         train_batch_metrics = []
-        data_iterator = iter(tfds.as_numpy(self.train_dataset.batch(self.batch_size)))
+        data_iterator = iter(tfds.as_numpy(
+            self.train_dataset.batch(self.batch_size)))
         preds = []
         gts = []
         for batch in data_iterator:
@@ -245,12 +250,13 @@ class LatencyModelTrainer:
 
     def save(self):
         checkpoints.save_checkpoint(ckpt_dir=self.checkpoint_dir,
-            target=self.state, step=0, overwrite=True)
+                                    target=self.state, step=0, overwrite=True)
         print(f"Saved to {self.checkpoint_dir}")
 
     def load_or_train(self):
         if os.path.exists(os.path.join(self.checkpoint_dir, "checkpoint_0")):
-            restored_state = checkpoints.restore_checkpoint(ckpt_dir=self.checkpoint_dir, target=self.state)
+            restored_state = checkpoints.restore_checkpoint(
+                ckpt_dir=self.checkpoint_dir, target=self.state)
             # assert jax.tree_util.tree_all(jax.tree_map(
             #     lambda x, y: (x == y).all(), self.state.params, restored_state.params))
             self.state = restored_state

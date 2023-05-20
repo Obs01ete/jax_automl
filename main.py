@@ -1,14 +1,10 @@
 import os
 import time
 import json
-from typing import Callable, Dict, Any, Iterable
 import numpy as np
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 import jax
-import jax.numpy as jnp
-import flax.linen as nn
 
 from benchmarking import create_dataset
 from latency_model import LatencyModelTrainer
@@ -16,12 +12,11 @@ from gradient_automl_linear import gradient_automl_linear
 from gradient_automl_conv2d import gradient_automl_conv2d
 
 
-
 def main():
 
     op_type = 'linear'
     # op_type = 'conv2d'
-    num_samples = 20000 # 20000 # 1000
+    num_samples = 20000  # 20000 # 1000
 
     dataset = load_or_create_dataset(op_type, num_samples)
 
@@ -43,8 +38,8 @@ def main():
 
 
 def load_or_create_dataset(
-    op_type = 'linear',
-    num_samples = 1000,
+    op_type='linear',
+    num_samples=1000,
 ):
     assert op_type in ('linear', 'conv2d')
 
@@ -97,13 +92,14 @@ def dataset_analytics(dataset):
     if len(feature_names) == 2:
         plt.scatter(features[:, 0]*features[:, 1], latencies, marker='.')
     else:
-        flops = np.product(features[:, :7], axis=-1) / np.product(features[:, 7:], axis=-1)
+        flops = np.product(features[:, :7], axis=-1) / \
+            np.product(features[:, 7:], axis=-1)
         plt.scatter(flops, latencies, marker='.')
     plt.xlabel("FLOPs")
     plt.ylabel("latency sec")
     plt.grid()
     plt.show()
-    
+
     print("")
 
 
